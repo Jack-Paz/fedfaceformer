@@ -210,7 +210,8 @@ if __name__=='__main__':
     parser.add_argument("--num_clients", type=int, default=8)
     parser.add_argument("--num_cpus", type=int, default=1)
     parser.add_argument("--num_gpus", type=float, default=1)
-    
+    parser.add_argument("--wav2vec_path", type=str, default="/home/paz/data/wav2vec2-base-960h", help='wav2vec path for the faceformer model')
+
     args = parser.parse_args()
 
     out_dir = f'vocaset/save_federated/clients_{args.num_clients}_max_epoch_{args.max_epoch}_rounds_{args.max_rounds}'

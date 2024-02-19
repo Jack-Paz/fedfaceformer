@@ -58,6 +58,8 @@ def main():
        " FaceTalk_170731_00024_TA")
     parser.add_argument('--model_path', type=str, default='vocaset/save_backup/100_model.pth')
     parser.add_argument('--test_random_initialisation', type=bool, action='store_true', default=False)
+    parser.add_argument("--wav2vec_path", type=str, default="/home/paz/data/wav2vec2-base-960h", help='wav2vec path for the faceformer model')
+
     args = parser.parse_args()
 
     #build model

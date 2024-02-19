@@ -3,7 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import sys
 
-def plot_csv_data(folder_path):
+def plot_csv_data(folder_path, baseline_path=''):
     # Iterate over files in the folder
     print(f'plotting csvs in {folder_path}')
     for file in os.listdir(folder_path):
@@ -21,6 +21,22 @@ def plot_csv_data(folder_path):
             # Plot accuracy
             plt.figure(2)
             plt.plot(data['accuracy'], label=label)
+    if args.baseline_path:
+        for file in os.listdir(baseline_path):
+            if file.endswith('.csv'):
+                if file.startswith('.'):
+                    continue
+                file_path = os.path.join(baseline_path, file)
+                # Read CSV file
+                data = pd.read_csv(file_path)
+                label = file.split('_results.csv')[0]
+                # Plot loss
+                plt.figure(1)
+                plt.plot(data['loss'], label='baseline')
+
+                # Plot accuracy
+                plt.figure(2)
+                plt.plot(data['accuracy'], label='baseline')
 
     # Loss graph settings
     plt.figure(1)
@@ -47,6 +63,10 @@ def plot_csv_data(folder_path):
 
 if __name__=='__main__':
     # Example usage
-    folder_path = sys.argv[1]
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--folder_path", type=str, default='', help='path to folder containing model result csvs')
+    parser.add_argument("--baseline_path", type=str, default='', help='path to folder containing baseline result csv')
+    args = parser.parse_args()
     
-    plot_csv_data(folder_path)
+    plot_csv_data(args.folder_path, args.baseline_path)
