@@ -31,6 +31,9 @@ def trainer(args, train_loader, dev_loader, model, optimizer, criterion, epoch=1
             iteration += 1
             # to gpu
             audio, vertice, template, one_hot  = audio.to(device="cuda"), vertice.to(device="cuda"), template.to(device="cuda"), one_hot.to(device="cuda")
+            # one_hot_vec = torch.zeros(1,8).to(device="cuda")
+            # one_hot_vec[0, int(one_hot.item())] = 1
+            # one_hot = one_hot_vec
             loss = model(audio, template,  vertice, one_hot, criterion,teacher_forcing=False)
             loss.backward()
             loss_log.append(loss.item())
@@ -68,7 +71,7 @@ def trainer(args, train_loader, dev_loader, model, optimizer, criterion, epoch=1
     return model
 
 @torch.no_grad()
-def test(args, model, test_loader,epoch):
+def test(args, model, test_loader, epoch): 
     result_path = os.path.join(args.dataset,args.result_path)
     if os.path.exists(result_path):
         shutil.rmtree(result_path)
@@ -80,7 +83,6 @@ def test(args, model, test_loader,epoch):
     model.load_state_dict(torch.load(os.path.join(save_path, '{}_model.pth'.format(epoch))))
     model = model.to(torch.device("cuda"))
     model.eval()
-   
     for audio, vertice, template, one_hot_all, file_name in test_loader:
         # to gpu
         audio, vertice, template, one_hot_all= audio.to(device="cuda"), vertice.to(device="cuda"), template.to(device="cuda"), one_hot_all.to(device="cuda")
@@ -126,21 +128,24 @@ def main():
        " FaceTalk_170908_03277_TA")
     parser.add_argument("--test_subjects", type=str, default="FaceTalk_170809_00138_TA"
        " FaceTalk_170731_00024_TA")
+    parser.add_argument("--train_idx", type=int, default=-1, help='index of speaker to train on for individual run, -1 = train on all speakers')
     args = parser.parse_args()
 
     #build model
+    train_subjects_list = args.train_subjects.split()
+    if args.train_idx!=-1:
+        args.train_subjects = train_subjects_list[args.train_idx]
+
     model = Faceformer(args)
     print("model parameters: ", count_parameters(model))
 
     # to cuda
     assert torch.cuda.is_available()
     model = model.to(torch.device("cuda"))
-    
     #load data
     dataset = get_dataloaders(args)
-    # loss
     criterion = nn.MSELoss()
-
+    breakpoint()
     # Train the model
     optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad,model.parameters()), lr=args.lr)
     model = trainer(args, dataset["train"], dataset["valid"],model, optimizer, criterion, epoch=args.max_epoch)

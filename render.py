@@ -98,8 +98,8 @@ def render_mesh_helper(args,mesh, t_center, rot=np.zeros(3), tex_img=None,  z_of
     try:
         r = pyrender.OffscreenRenderer(viewport_width=frustum['width'], viewport_height=frustum['height'])
         color, _ = r.render(scene, flags=flags)
-    except:
-        print('pyrender: Failed rendering frame')
+    except Exception as e:
+        print('pyrender: Failed rendering frame', e)
         color = np.zeros((frustum['height'], frustum['width'], 3), dtype='uint8')
 
     return color[..., ::-1]
@@ -135,6 +135,7 @@ def main():
     parser.add_argument("--vertice_dim", type=int, default=5023*3, help='number of vertices - 5023*3 for vocaset; 23370*3 for BIWI')
     parser.add_argument("--pred_path", type=str, default="result", help='path of the predictions')
     parser.add_argument("--output", type=str, default="output", help='path of the rendered video sequences')
+    parser.add_argument("--twicespeed", action='store_true', default=False, help='run at 2x speed (for gold standard)')
     args = parser.parse_args()
 
     pred_path = os.path.join(args.dataset,args.pred_path)
@@ -158,7 +159,8 @@ def main():
 
             predicted_vertices = np.load(predicted_vertices_path)
             predicted_vertices = np.reshape(predicted_vertices,(-1,args.vertice_dim//3,3))
-
+            if args.twicespeed:
+                predicted_vertices = predicted_vertices[::2, :]
             render_sequence_meshes(args,predicted_vertices, template, output_path,predicted_vertices_path,vt, ft ,tex_img)
 
 if __name__=="__main__":

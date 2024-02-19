@@ -45,14 +45,17 @@ def read_data(args):
 
     audio_path = os.path.join(args.dataset, args.wav_path)
     vertices_path = os.path.join(args.dataset, args.vertices_path)
-    processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
+    # processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
+    processor = Wav2Vec2Processor.from_pretrained("/home/paz/data/wav2vec2-base-960h")
 
     template_file = os.path.join(args.dataset, args.template_file)
     with open(template_file, 'rb') as fin:
         templates = pickle.load(fin,encoding='latin1')
     
     for r, ds, fs in os.walk(audio_path):
-        for f in tqdm(fs):
+        # fs_list = tqdm(fs)
+        fs_list = fs
+        for f in fs_list:
             if f.endswith("wav"):
                 wav_path = os.path.join(r,f)
                 speech_array, sampling_rate = librosa.load(wav_path, sr=16000)
@@ -93,15 +96,16 @@ def read_data(args):
     print(len(train_data), len(valid_data), len(test_data))
     return train_data, valid_data, test_data, subjects_dict
 
-def get_dataloaders(args):
+def get_dataloaders(args, return_test=True):
     dataset = {}
     train_data, valid_data, test_data, subjects_dict = read_data(args)
     train_data = Dataset(train_data,subjects_dict,"train")
     dataset["train"] = data.DataLoader(dataset=train_data, batch_size=1, shuffle=True)
     valid_data = Dataset(valid_data,subjects_dict,"val")
     dataset["valid"] = data.DataLoader(dataset=valid_data, batch_size=1, shuffle=False)
-    test_data = Dataset(test_data,subjects_dict,"test")
-    dataset["test"] = data.DataLoader(dataset=test_data, batch_size=1, shuffle=False)
+    if return_test:
+        test_data = Dataset(test_data,subjects_dict,"test")
+        dataset["test"] = data.DataLoader(dataset=test_data, batch_size=1, shuffle=False)
     return dataset
 
 if __name__ == "__main__":
