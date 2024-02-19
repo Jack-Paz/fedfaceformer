@@ -183,7 +183,6 @@ def add_to_csv(csv_path, add_dict):
     merged_df = pd.concat([df, df_to_add])
     merged_df.to_csv(csv_path, index=False)
     #update graph
-    plot_csv_data(os.path.dirname(csv_path))
 
 if __name__=='__main__':
     # taken from main.py
