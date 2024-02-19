@@ -1,6 +1,7 @@
 #Data stuff (JP)
 vocaset/
 .*
+FLAMEModel/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
