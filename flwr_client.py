@@ -203,7 +203,7 @@ if __name__=='__main__':
     parser.add_argument("--save_path", type=str, default="save", help='path of the trained models')
     parser.add_argument("--result_path", type=str, default="result", help='path to the predictions')
     parser.add_argument("--train_subjects", type=str, default="FaceTalk_170728_03272_TA FaceTalk_170904_00128_TA FaceTalk_170725_00137_TA FaceTalk_170915_00223_TA FaceTalk_170811_03274_TA FaceTalk_170913_03279_TA FaceTalk_170904_03276_TA FaceTalk_170912_03278_TA")
-    parser.add_argument("--val_subjects", type=str, default="FaceTalk_170811_03275_TA"
+    parser.add_argument("--valid_subjects", type=str, default="FaceTalk_170811_03275_TA"
        " FaceTalk_170908_03277_TA")
     parser.add_argument("--test_subjects", type=str, default="FaceTalk_170809_00138_TA"
        " FaceTalk_170731_00024_TA")
@@ -211,14 +211,18 @@ if __name__=='__main__':
     parser.add_argument("--num_cpus", type=int, default=1)
     parser.add_argument("--num_gpus", type=float, default=1)
     parser.add_argument("--wav2vec_path", type=str, default="/home/paz/data/wav2vec2-base-960h", help='wav2vec path for the faceformer model')
-
+    parser.add_argument("--aggr", type=str, default="avg", help='avg | mask - which aggregation method to use')
     args = parser.parse_args()
 
-    out_dir = f'vocaset/save_federated/clients_{args.num_clients}_max_epoch_{args.max_epoch}_rounds_{args.max_rounds}'
+    out_dir = f'vocaset/save_federated/clients_{args.num_clients}_max_epoch_{args.max_epoch}_rounds_{args.max_rounds}_aggr_{args.aggr}'
     os.makedirs(out_dir, exist_ok=True)
 
     train_subjects_list = [i for i in args.train_subjects.split(" ")]
     train_subjects_list = get_train_subjects_partition(train_subjects_list, args.num_clients)
+
+    # print("TESTING SOMETHING W TRAIN SUBJECTS LIST DELETE DELETE")
+    # train_subjects_list = get_train_subjects_partition(train_subjects_list, 2)
+
     from data_loader import get_dataloaders
 
 
@@ -288,7 +292,14 @@ if __name__=='__main__':
         #splitting on subjects
         if int(cid)>len(train_subjects_list)-1:
             raise Exception('Requested n clients > n_subjects, not implemented yet')
-        args.train_subjects = train_subjects_list[int(cid)]
+        
+        if args.aggr=='avg':
+            args.train_subjects = train_subjects_list[int(cid)]
+        elif args.aggr=='mask':
+            pass
+        else: 
+            raise NotImplementedError('args.aggr chosen not implemented')
+        train_subjects_subset = train_subjects_list[int(cid)]
 
         model = Faceformer(args)
         # to cuda
@@ -296,22 +307,18 @@ if __name__=='__main__':
         model = model.to(torch.device("cuda"))
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad,model.parameters()), lr=args.lr)
+        
+        # dataset = get_dataloaders(args, return_test=False)
 
-        #index for train data (GAVE MEMORY ERRORS - TRYING AGAIN)
-        # trainloader = train_loaders[int(cid)]
-        # valloader = []
-        # return FlowerClient(model, trainloader, valloader, optimizer, criterion, cid).to_client()
-    
-        #in this setting the valloader is defined above
-
-        #or load data every time (slower but more memory efficient)
-        dataset = get_dataloaders(args, return_test=False)
+        dataset = get_dataloaders(args, train_subjects_subset, splits=['train','valid'])
+        
         trainloader = dataset['train']
         valloader = dataset['valid']
 
+        # Create a  single Flower client representing a single organization
+        client = FlowerClient(model, trainloader, valloader, optimizer, criterion, cid).to_client()
 
         #eval intitial parameters - really janky implementation just for debugging
-        client = FlowerClient(model, trainloader, valloader, optimizer, criterion, cid).to_client()
         npclient = client.numpy_client
         if not os.path.exists(npclient.metrics_path):
             print(f"evaluating client {npclient.cid} (initial params)")
@@ -320,7 +327,6 @@ if __name__=='__main__':
             metrics_dict = {'loss': [loss], 'accuracy': [float(accuracy)]}
             add_to_csv(npclient.metrics_path, metrics_dict)
 
-        # Create a  single Flower client representing a single organization
         return client
 
     def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
@@ -339,12 +345,17 @@ if __name__=='__main__':
         config: Dict[str, fl.common.Scalar],
     ) -> Optional[Tuple[float, Dict[str, fl.common.Scalar]]]:
         metrics_path = f'{out_dir}/aggregated_results.csv'
-        args.train_subjects = train_subjects_list[0] #just doing this to ensure the input layer is the correct dimension, could choose any arbitrary num speakers (of the correct length)
+        if args.aggr=='avg':
+            args.train_subjects = train_subjects_list[0] #data partition 0, just used for input dim
+        elif args.aggr=='mask':
+            #leave args.train_subjects to initialise first layer 
+            pass
         model = Faceformer(args)
         model = model.to(torch.device("cuda"))
         set_parameters(model, parameters)  # Update model with the latest parameters
         
-        dataset = get_dataloaders(args, return_test=False) #load every time for memory
+        # dataset = get_dataloaders(args, return_test=False) #load every time for memory
+        dataset = get_dataloaders(args, train_subjects_subset=None, splits=['valid'])
         valloader = dataset['valid']
 
         # valloader = VALLOADER #use global valloader
@@ -372,7 +383,11 @@ if __name__=='__main__':
             # Call aggregate_fit from base class (FedAvg) to aggregate parameters and metrics
             aggregated_parameters, aggregated_metrics = super().aggregate_fit(server_round, results, failures)
             if aggregated_parameters is not None:
-                args.train_subjects = train_subjects_list[0]
+                if args.aggr=='avg':
+                    args.train_subjects = train_subjects_list[0] #data partition 0, just used for input dim
+                elif args.aggr=='mask':
+                    #leave args.train_subjects to initialise first layer 
+                    pass
                 net = Faceformer(args)
                 print(f"Saving round {server_round} aggregated_parameters...")
 

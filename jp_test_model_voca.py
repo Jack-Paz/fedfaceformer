@@ -113,7 +113,8 @@ class test_dataset_wise():
         return results_dict_list
 
     def run_test(self, model, data, logdir, dataset_to_eval, condition=2):
-        out_dir = os.path.join(logdir, f"voca_eval_with_fixed_test_cond_{condition}")
+        model_name = os.path.basename(args.model_path)[:-4]
+        out_dir = os.path.join(logdir, f"eval_model_{model_name}_cond_{condition}")
         os.makedirs(out_dir, exist_ok=True)
 
         test_data = data
@@ -185,6 +186,7 @@ if __name__ == "__main__":
     parser.add_argument('-r', '--render_results', default=False, action='store_true')
     parser.add_argument("--train_idx", type=int, default=-1, help='index of speaker to train on for individual run, -1 = train on all speakers')
     parser.add_argument('--test_random_initialisation', action='store_true', default=False)
+    parser.add_argument("--wav2vec_path", type=str, default="/home/paz/data/wav2vec2-base-960h", help='wav2vec path for the faceformer model')
 
     args = parser.parse_args()
     from faceformer import Faceformer
