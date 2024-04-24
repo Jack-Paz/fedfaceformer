@@ -6,6 +6,8 @@ import copy
 import math
 from wav2vec import Wav2Vec2Model
 
+from opacus.grad_sample import GradSampleModule
+
 # Temporal Bias, inspired by ALiBi: https://github.com/ofirpress/attention_with_linear_biases
 def init_biased_mask(n_head, max_seq_len, period):
     def get_slopes(n):
@@ -75,19 +77,19 @@ class Faceformer(nn.Module):
 
         # wav2vec 2.0 weights initialization
         self.audio_encoder.feature_extractor._freeze_parameters()
-        self.audio_feature_map = nn.Linear(768, args.feature_dim)
+        self.audio_feature_map = GradSampleModule(nn.Linear(768, args.feature_dim))
         # motion encoder
-        self.vertice_map = nn.Linear(args.vertice_dim, args.feature_dim)
+        self.vertice_map = GradSampleModule(nn.Linear(args.vertice_dim, args.feature_dim))
         # periodic positional encoding 
         self.PPE = PeriodicPositionalEncoding(args.feature_dim, period = args.period)
         # temporal bias
         self.biased_mask = init_biased_mask(n_head = 4, max_seq_len = 600, period=args.period)
-        decoder_layer = nn.TransformerDecoderLayer(d_model=args.feature_dim, nhead=4, dim_feedforward=2*args.feature_dim, batch_first=True)        
-        self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=1)
+        decoder_layer = GradSampleModule(nn.TransformerDecoderLayer(d_model=args.feature_dim, nhead=4, dim_feedforward=2*args.feature_dim, batch_first=True)) #this one wont work      
+        self.transformer_decoder = GradSampleModule(nn.TransformerDecoder(decoder_layer, num_layers=1)) #this one wont work
         # motion decoder
-        self.vertice_map_r = nn.Linear(args.feature_dim, args.vertice_dim)
+        self.vertice_map_r = GradSampleModule(nn.Linear(args.feature_dim, args.vertice_dim))
         # style embeddingtr
-        self.obj_vector = nn.Linear(len(args.train_subjects.split()), args.feature_dim, bias=False)
+        self.obj_vector = GradSampleModule(nn.Linear(len(args.train_subjects.split()), args.feature_dim, bias=False))
         self.device = args.device
         nn.init.constant_(self.vertice_map_r.weight, 0)
         nn.init.constant_(self.vertice_map_r.bias, 0)

@@ -16,7 +16,6 @@ from tqdm import tqdm
 import os, shutil
 import copy
 
-from faceformer import Faceformer
 from main import trainer, test, count_parameters
 
 from typing import Callable, Dict, List, Optional, Tuple, Union
@@ -27,6 +26,7 @@ from flwr.common.logger import log
 import pandas as pd
 from visualise_results import plot_csv_data
 
+from imitator.utils.losses import Custom_errors
 
 DEFAULT_FORMATTER = logging.Formatter(
 "%(levelname)s %(name)s %(asctime)s | %(filename)s:%(lineno)d | %(message)s"
@@ -77,14 +77,18 @@ def lip_max_l2(vertice_dim, predict, real):
     mean_max_l2_error_lip_vert = torch.mean(max_l2_error_lip_vert)
     return mean_max_l2_error_lip_vert
 
+def compute_auxillary_losses(predicted_mesh, gt_mesh, custom_loss):
+    velocity_loss, velocity_loss_weighted = custom_loss.velocity_loss(predicted_mesh, gt_mesh)  # predict, real
+    aux_loss_sum = velocity_loss_weighted
+    loss_dict = {
+        "aux_losses": aux_loss_sum,
+        "velocity_loss": velocity_loss,
+    }
+    return loss_dict
 
-def train(args, train_loader, model, optimizer, criterion, epoch=100):
-    save_path = os.path.join(args.dataset,args.save_path)
-    if os.path.exists(save_path):
-        shutil.rmtree(save_path)
-    os.makedirs(save_path)
-
+def train(args, train_loader, model, optimizer, criterion, custom_loss, privacy_engine, epoch=100):
     iteration = 0
+    epoch_losses = []
     for e in range(epoch):
         loss_log = []
         # train
@@ -96,37 +100,64 @@ def train(args, train_loader, model, optimizer, criterion, epoch=100):
         for i, (audio, vertice, template, one_hot, file_name) in enumerate(train_loader):
             iteration += 1
             audio, vertice, template, one_hot  = audio.to(device="cuda"), vertice.to(device="cuda"), template.to(device="cuda"), one_hot.to(device="cuda")
-            loss = model(audio, template,  vertice, one_hot, criterion,teacher_forcing=False)
+            if args.model=='faceformer':
+                loss = model(audio, template,  vertice, one_hot, criterion,teacher_forcing=False)
+            elif args.model=='imitator_gen':
+                #train generalised model, use normal loss
+                loss, vertice_out_w_style = model(audio, template,  vertice, one_hot, criterion,teacher_forcing=False)
+            elif args.model.startswith('imitator_stg'):
+                #train speaker-specific model, use style loss
+                rec_loss, pred_verts = model.style_forward(audio, file_name, template,  vertice, one_hot, criterion,teacher_forcing=False)
+                subjsen = file_name[0].split(".")[0]
+                mbp_loss = custom_loss.compute_mbp_reconstruction_loss(pred_verts, vertice, subjsen)
+                aux_loss = compute_auxillary_losses(pred_verts, vertice, custom_loss)
+                loss = rec_loss + aux_loss["aux_losses"] + mbp_loss
+
             loss.backward()
             loss_log.append(loss.item())
             if i % args.gradient_accumulation_steps==0:
                 optimizer.step()
                 optimizer.zero_grad()
+            if args.dp=='opacus':
+                epsilon = privacy_engine.accountant.get_epsilon(delta=args.delta)
+                print(f"(ε = {epsilon:.2f}, δ = {args.delta})")
 
-            # pbar.set_description("(Epoch {}, iteration {}) TRAIN LOSS:{:.7f}".format((e+1), iteration ,np.mean(loss_log)))
+        epoch_loss = np.mean(loss_log)
+        epoch_losses.append(epoch_loss)
+    return epoch_losses
 
-def eval(args, dev_loader, model, criterion):
+def eval(args, dev_loader, model, criterion, custom_loss):
     valid_loss_log = []
     model.eval()
-    train_subjects_list = [i for i in args.train_subjects.split(" ")]
+    train_subjects_list = [i for i in args.all_train_subjects.split(" ")]
     for audio, vertice, template, one_hot_all,file_name in dev_loader:
         # to gpu
         audio, vertice, template, one_hot_all= audio.to(device="cuda"), vertice.to(device="cuda"), template.to(device="cuda"), one_hot_all.to(device="cuda")
         train_subject = "_".join(file_name[0].split("_")[:-1])
         if train_subject in train_subjects_list:
-            condition_subject = train_subject
-            iter = train_subjects_list.index(condition_subject)
-            one_hot = one_hot_all[:,iter,:]
-            loss = model(audio, template,  vertice, one_hot, criterion)
-            valid_loss_log.append(loss.item())
+            train_subject_id = train_subjects_list.index(condition_subject)
+            train_subject_ids = [train_subject_id]
+            #we saw this subject in training, condition on them
         else:
-            #average across all speakers
-            for iter in range(one_hot_all.shape[-1]):
-                condition_subject = train_subjects_list[iter]
-                one_hot = one_hot_all[:,iter,:]
+            train_subject_ids = range(one_hot_all.shape[-1])
+            #subject not in training, take the average of all subjects
+
+        for iter in train_subject_ids:
+            condition_subject = train_subjects_list[iter]
+            one_hot = one_hot_all[:,iter,:]
+            if args.model=='faceformer':
                 loss = model(audio, template,  vertice, one_hot, criterion)
-                valid_loss_log.append(loss.item())
-                    
+            elif args.model=='imitator_gen':
+                #train generalised model, use normal loss
+                loss, vertice_out_w_style = model(audio, template,  vertice, one_hot, criterion,teacher_forcing=False)
+            elif args.model.startswith('imitator_stg'):
+                #train speaker-specific model, use style loss
+                rec_loss, pred_verts = model.style_forward(audio, file_name, template,  vertice, one_hot, criterion,teacher_forcing=False)
+                subjsen = file_name[0].split(".")[0]
+                mbp_loss = custom_loss.compute_mbp_reconstruction_loss(pred_verts, vertice, subjsen)
+                aux_loss = compute_auxillary_losses(pred_verts, vertice, custom_loss)
+                loss = rec_loss + aux_loss["aux_losses"] + mbp_loss
+        valid_loss_log.append(loss.item())                    
     current_loss = np.mean(valid_loss_log)
         # print("epcoh: {}, current loss:{:.7f}".format(e+1,current_loss))    
     return current_loss
@@ -134,7 +165,7 @@ def eval(args, dev_loader, model, criterion):
 @torch.no_grad()
 def test(args, model, test_loader):
     # save_path = os.path.join(args.dataset,args.save_path)
-    train_subjects_list = [i for i in args.train_subjects.split(" ")]
+    train_subjects_list = [i for i in args.all_train_subjects.split(" ")]
 
     # model.load_state_dict(torch.load(os.path.join(save_path, '{}_model.pth'.format(epoch))))
     # model = model.to(torch.device("cuda"))
@@ -145,26 +176,36 @@ def test(args, model, test_loader):
         audio, vertice, template, one_hot_all= audio.to(device="cuda"), vertice.to(device="cuda"), template.to(device="cuda"), one_hot_all.to(device="cuda")
         train_subject = "_".join(file_name[0].split("_")[:-1])
         if train_subject in train_subjects_list:
-            condition_subject = train_subject
-            iter = train_subjects_list.index(condition_subject)
+            train_subject_id = train_subjects_list.index(condition_subject)
+            train_subject_ids = [train_subject_id]
+            #we saw this subject in training, condition on them
+        else:
+            train_subject_ids = range(one_hot_all.shape[-1])
+            #subject not in training, take the best result across all subjects (like Imitator does)
+        
+        identity_results = []
+        for iter in train_subject_ids:
+            condition_subject = train_subjects_list[iter]
             one_hot = one_hot_all[:,iter,:]
             prediction = model.predict(audio, template, one_hot)
             prediction = prediction.squeeze() # (seq_len, V*3)
             vertice = vertice.squeeze()
             result = lip_max_l2(args.vertice_dim, prediction, vertice)
-            results.append(result)
-        else:
-            #iterate through all conditions
-            identity_results = []
-            for iter in range(one_hot_all.shape[-1]):
-                condition_subject = train_subjects_list[iter]
-                one_hot = one_hot_all[:,iter,:]
-                prediction = model.predict(audio, template, one_hot)
-                prediction = prediction.squeeze() # (seq_len, V*3)
-                vertice = vertice.squeeze()
-                result = lip_max_l2(args.vertice_dim, prediction, vertice)
-                identity_results.append(result)
-            results.append(torch.min(torch.stack(identity_results)))
+            identity_results.append(result)
+        results.append(torch.min(torch.stack(identity_results)))
+        # else:
+        #     #iterate through all conditions
+        #     print('iterating all test conditions')
+        #     identity_results = []
+        #     for iter in range(one_hot_all.shape[-1]):
+        #         condition_subject = train_subjects_list[iter]
+        #         one_hot = one_hot_all[:,iter,:]
+        #         prediction = model.predict(audio, template, one_hot)
+        #         prediction = prediction.squeeze() # (seq_len, V*3)
+        #         vertice = vertice.squeeze()
+        #         result = lip_max_l2(args.vertice_dim, prediction, vertice)
+        #         identity_results.append(result)
+        #     results.append(torch.min(torch.stack(identity_results)))
     return torch.mean(torch.as_tensor(results))
 
 def set_parameters(net, parameters: List[np.ndarray]):
@@ -184,12 +225,50 @@ def add_to_csv(csv_path, add_dict):
     merged_df.to_csv(csv_path, index=False)
     #update graph
 
+
+def freeze_p1(model):
+    print("\nFreezing from the imitator_org_vert_reg_style_optim\n")
+    # freeze the model expect the style emebeddding
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # unfrezzing the style encoder
+    for param in model.obj_vector.parameters():
+        param.requires_grad = True
+
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print('trainable params after freezing p1:', trainable_params)
+    return model
+
+def freeze_p2(model):
+    # freeze the model expect the style emebeddding
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # unfreezing the style encoder
+    for param in model.obj_vector.parameters():
+        param.requires_grad = True
+
+    # unfreeze the motion decoder
+    # v
+    for name, param in model.vertice_map_r.named_parameters():
+        if "final_out_layer" in name:
+            param.requires_grad = True
+        else:
+            param.requires_grad = False
+
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print("number of trainiable params after freezing p2", trainable_params)
+    return model
+
+
 if __name__=='__main__':
     # taken from main.py
     import argparse
     parser = argparse.ArgumentParser(description='FaceFormer: Speech-Driven 3D Facial Animation with Transformers')
     parser.add_argument("--lr", type=float, default=0.0001, help='learning rate')
-    parser.add_argument("--dataset", type=str, default="vocaset", help='vocaset or BIWI')
+    parser.add_argument("--dir", type=str, default='.', help='path to working dir')
+    parser.add_argument("--dataset", type=str, default="vocaset", help='vocaset or BIWI | hdtf | combined (hdtf + vocaset)')
     parser.add_argument("--vertice_dim", type=int, default=5023*3, help='number of vertices - 5023*3 for vocaset; 23370*3 for BIWI')
     parser.add_argument("--feature_dim", type=int, default=64, help='64 for vocaset; 128 for BIWI')
     parser.add_argument("--period", type=int, default=30, help='period in PPE - 30 for vocaset; 25 for BIWI')
@@ -200,9 +279,11 @@ if __name__=='__main__':
     parser.add_argument("--max_rounds", type=int, default=5, help='number of rounds')
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--template_file", type=str, default="templates.pkl", help='path of the personalized templates')
-    parser.add_argument("--save_path", type=str, default="save", help='path of the trained models')
+    parser.add_argument("--save_path", type=str, default="save_federated", help='path of the trained models')
     parser.add_argument("--result_path", type=str, default="result", help='path to the predictions')
     parser.add_argument("--train_subjects", type=str, default="FaceTalk_170728_03272_TA FaceTalk_170904_00128_TA FaceTalk_170725_00137_TA FaceTalk_170915_00223_TA FaceTalk_170811_03274_TA FaceTalk_170913_03279_TA FaceTalk_170904_03276_TA FaceTalk_170912_03278_TA")
+    parser.add_argument("--all_train_subjects", type=str, default="FaceTalk_170728_03272_TA FaceTalk_170904_00128_TA FaceTalk_170725_00137_TA FaceTalk_170915_00223_TA FaceTalk_170811_03274_TA FaceTalk_170913_03279_TA FaceTalk_170904_03276_TA FaceTalk_170912_03278_TA")
+
     parser.add_argument("--valid_subjects", type=str, default="FaceTalk_170811_03275_TA"
        " FaceTalk_170908_03277_TA")
     parser.add_argument("--test_subjects", type=str, default="FaceTalk_170809_00138_TA"
@@ -210,20 +291,43 @@ if __name__=='__main__':
     parser.add_argument("--num_clients", type=int, default=8)
     parser.add_argument("--num_cpus", type=int, default=1)
     parser.add_argument("--num_gpus", type=float, default=1)
+
+
     parser.add_argument("--wav2vec_path", type=str, default="/home/paz/data/wav2vec2-base-960h", help='wav2vec path for the faceformer model')
     parser.add_argument("--aggr", type=str, default="avg", help='avg | mask - which aggregation method to use')
+    parser.add_argument("--dp", type=str, default="none", help='none | fixed | adaptive | opacus - which dp method to use')
+    parser.add_argument("--data_split", type=str, default="vertical", help='vertical | horziontal - vertical=split on speakers, horzontal=split some of each train speaker for test and valid')
+    parser.add_argument("--train_idx", type=int, default=-1, help='index of speaker to train on for individual run, -1 = train on all speakers')
+    parser.add_argument("--condition_idx", type=int, default=2, help='for imitator runs, which speaker to initialise the personalisation layer')
+    parser.add_argument("--model", type=str, default='faceformer', help='which model to train, faceformer, imitator_gen, imitator_stg01, imitator_stg02')
+    parser.add_argument("--base_model_path", type=str, default='', help='path to previous round of training (for imitator_stg01 and 02')
+
     args = parser.parse_args()
 
-    out_dir = f'vocaset/save_federated/clients_{args.num_clients}_max_epoch_{args.max_epoch}_rounds_{args.max_rounds}_aggr_{args.aggr}'
+    if args.train_idx != -1:
+        args.train_subjects = args.train_subjects.split(" ")[args.train_idx]
+
+
+    if args.data_split=='horizontal':
+        print('HORIZONTAL DATA SPLIT, setting vaild and test subjects to train subjects')
+        print('data will be split 60/20/20 within speakers')
+        # args.train_subjects = ' '.join([args.train_subjects, args.valid_subjects, args.test_subjects])
+        args.valid_subjects=args.train_subjects
+        args.test_subjects=args.train_subjects
+
+    out_dir = f'{args.dir}/{args.dataset}/{args.save_path}/clients_{args.num_clients}_e_{args.max_epoch}_aggr_{args.aggr}_data_split_{args.data_split}_dp_{args.dp}_train_idx_{args.train_idx}_model_{args.model}'
     os.makedirs(out_dir, exist_ok=True)
 
     train_subjects_list = [i for i in args.train_subjects.split(" ")]
     train_subjects_list = get_train_subjects_partition(train_subjects_list, args.num_clients)
 
-    # print("TESTING SOMETHING W TRAIN SUBJECTS LIST DELETE DELETE")
-    # train_subjects_list = get_train_subjects_partition(train_subjects_list, 2)
-
     from data_loader import get_dataloaders
+
+    if args.dp=='opacus':
+        from imitator.models.opacus_nn_model_jp import imitator
+    else:
+        from imitator.models.nn_model_jp import imitator
+
 
 
     # args.train_subjects_list = train_subjects_list #hack it into namespace for other fns
@@ -246,14 +350,18 @@ if __name__=='__main__':
     # testloader = DataLoader(dataset=test_data, batch_size=1, shuffle=False)
 
     class FlowerClient(fl.client.NumPyClient):
-        def __init__(self, net, trainloader, valloader, optimizer, criterion, cid):
+        def __init__(self, net, trainloader, valloader, optimizer, criterion, privacy_engine, cid):
+            loss_cfg = {'full_rec_loss': 1.0, 'velocity_weight': 10.0}
             self.net = net
             self.trainloader = trainloader
             self.valloader = valloader
             self.optimizer = optimizer
             self.criterion = criterion
             self.cid = cid
-            self.metrics_path = f'{out_dir}/client_{cid}_results.csv'
+            self.privacy_engine = privacy_engine
+            self.train_metrics_path = f'{out_dir}/client_{cid}_train_results.csv'
+            self.valid_metrics_path = f'{out_dir}/client_{cid}_valid_results.csv'
+            self.custom_loss = Custom_errors(args.vertice_dim, loss_creterion=self.criterion, loss_dict=loss_cfg)
 
         def get_parameters(self, config):
             return [val.cpu().numpy() for _, val in self.net.state_dict().items()]
@@ -261,15 +369,19 @@ if __name__=='__main__':
         def fit(self, parameters, config):
             print(f"training client {self.cid}")
             set_parameters(self.net, parameters)
-            train(args, self.trainloader, self.net, self.optimizer, self.criterion, epoch=args.max_epoch)
-            #evaluate after train epochs concluded
+            epoch_losses = train(args, self.trainloader, self.net, self.optimizer, self.criterion, self.custom_loss, self.privacy_engine, epoch=args.max_epoch)
+            # evaluate after train epochs concluded
+            metrics_dict = {'loss': epoch_losses}
+            add_to_csv(self.train_metrics_path, metrics_dict)
+
             print(f"evaluating client {self.cid}")
-            loss = eval(args, self.valloader, self.net, self.criterion)
+            loss = eval(args, self.valloader, self.net, self.criterion, self.custom_loss)
+
             accuracy = test(args, self.net, self.valloader)
             # loss = eval(args, VALLOADER, self.net, self.criterion)
             # accuracy = test(args, self.net, VALLOADER)
             metrics_dict = {'loss': [loss], 'accuracy': [float(accuracy)]}
-            add_to_csv(self.metrics_path, metrics_dict)
+            add_to_csv(self.valid_metrics_path, metrics_dict)
             return self.get_parameters(config={}), len(self.trainloader), {}
 
         def evaluate(self, parameters, config):
@@ -299,33 +411,81 @@ if __name__=='__main__':
             pass
         else: 
             raise NotImplementedError('args.aggr chosen not implemented')
-        train_subjects_subset = train_subjects_list[int(cid)]
+        train_subjects_subset = train_subjects_list[int(cid)] #the train subjects for a given client
 
-        model = Faceformer(args)
+        if args.model=='faceformer':
+            from faceformer import Faceformer
+            model = Faceformer(args)
+        elif args.model.startswith('imitator'):
+            #might have to do some funky stuff with the args first
+            # args.num_identity_classes = 8 #maybe change this to all_train_subjects like in their code
+            args.num_identity_classes = len(args.all_train_subjects.split()) #always all subjects
+            args.num_dec_layers = 5
+            args.fixed_channel = True
+            args.style_concat = False
+            model = imitator(args)
+            if args.model=='imitator_stg01':
+                print(f'training imitator_stg01, loading existing model at {args.base_model_path}')
+                pretrained_model = torch.load(args.base_model_path)
+                parameters = []
+                for name, val in pretrained_model.items():
+                    if name=='obj_vector.weight':
+                        val[:, 0] = val[:, int(args.condition_idx)] #Set 0th speaker as condition idx (best one from paper)                        
+                    parameters.append(val.cpu().numpy())
+                set_parameters(model, parameters)
+                print('freezing params for stg01')
+                model = freeze_p1(model)
+            elif args.model=='imitator_stg02':
+                print(f'training imitator_stg02, loading existing model at {args.base_model_path}')
+                pretrained_model = torch.load(args.base_model_path)
+                parameters = [val.cpu().numpy() for _, val in pretrained_model.items()]
+                set_parameters(model, parameters)
+                print('doing stg02, freezing weights')
+                model = freeze_p2(model)
+
         # to cuda
         assert torch.cuda.is_available()
         model = model.to(torch.device("cuda"))
         criterion = nn.MSELoss()
-        optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad,model.parameters()), lr=args.lr)
-        
+        if args.dp=='opacus':
+            #do NOT filter untrainable params bc it breaks opacus. Opacus SHOULD ignore these.
+            optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+        else:
+            optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad,model.parameters()), lr=args.lr)
+
         # dataset = get_dataloaders(args, return_test=False)
 
         dataset = get_dataloaders(args, train_subjects_subset, splits=['train','valid'])
         
         trainloader = dataset['train']
         valloader = dataset['valid']
+        
+        privacy_engine = None
+        if args.dp=='opacus':
+            # for i, j in zip(list(model.parameters()), sum(
+            #             [param_group["params"] for param_group in optimizer.param_groups],[],)):
+            #     if not i.shape==j.shape:
+            #         breakpoint()
+            privacy_engine = PrivacyEngine(secure_mode=False) #make secure for final training!
+            model, optimizer, trainloader = privacy_engine.make_private(
+                module=model,
+                optimizer=optimizer,
+                data_loader=trainloader,
+                noise_multiplier=1.0,
+                max_grad_norm=1.0,
+            )
 
         # Create a  single Flower client representing a single organization
-        client = FlowerClient(model, trainloader, valloader, optimizer, criterion, cid).to_client()
+        client = FlowerClient(model, trainloader, valloader, optimizer, criterion, privacy_engine, cid).to_client()
 
         #eval intitial parameters - really janky implementation just for debugging
-        npclient = client.numpy_client
-        if not os.path.exists(npclient.metrics_path):
-            print(f"evaluating client {npclient.cid} (initial params)")
-            loss = eval(args, npclient.valloader, npclient.net, npclient.criterion)
-            accuracy = test(args, npclient.net, npclient.valloader)
-            metrics_dict = {'loss': [loss], 'accuracy': [float(accuracy)]}
-            add_to_csv(npclient.metrics_path, metrics_dict)
+        # npclient = client.numpy_client
+        # if not os.path.exists(npclient.metrics_path):
+        #     print(f"evaluating client {npclient.cid} (initial params)")
+        #     loss = eval(args, npclient.valloader, npclient.net, npclient.criterion)
+        #     accuracy = test(args, npclient.net, npclient.valloader)
+        #     metrics_dict = {'loss': [loss], 'accuracy': [float(accuracy)]}
+        #     add_to_csv(npclient.metrics_path, metrics_dict)
 
         return client
 
@@ -350,7 +510,14 @@ if __name__=='__main__':
         elif args.aggr=='mask':
             #leave args.train_subjects to initialise first layer 
             pass
-        model = Faceformer(args)
+        if args.model=='faceformer':
+            model = Faceformer(args)
+        elif args.model.startswith('imitator'):
+            args.num_identity_classes = len(args.all_train_subjects.split()) #always all subjects
+            args.num_dec_layers = 5
+            args.fixed_channel = True
+            args.style_concat = False
+            model = imitator(args)
         model = model.to(torch.device("cuda"))
         set_parameters(model, parameters)  # Update model with the latest parameters
         
@@ -361,7 +528,10 @@ if __name__=='__main__':
         # valloader = VALLOADER #use global valloader
 
         criterion = nn.MSELoss()
-        loss = eval(args, valloader, model, criterion)
+        loss_cfg = {'full_rec_loss': 1.0, 'velocity_weight': 10.0}        
+        custom_loss = Custom_errors(args.vertice_dim, loss_creterion=criterion, loss_dict=loss_cfg)
+
+        loss = eval(args, valloader, model, criterion, custom_loss)
         accuracy = test(args, model, valloader)
         
         print(f'saving aggregated metrics')
@@ -388,7 +558,15 @@ if __name__=='__main__':
                 elif args.aggr=='mask':
                     #leave args.train_subjects to initialise first layer 
                     pass
-                net = Faceformer(args)
+                if args.model=='faceformer':
+                    net = Faceformer(args)
+                elif args.model.startswith('imitator'):
+                    args.num_identity_classes = len(args.all_train_subjects.split()) #always all subjects
+                    args.num_dec_layers = 5
+                    args.fixed_channel = True
+                    args.style_concat = False
+                    net = imitator(args)
+                    
                 print(f"Saving round {server_round} aggregated_parameters...")
 
                 # Convert `Parameters` to `List[np.ndarray]`
@@ -402,6 +580,7 @@ if __name__=='__main__':
                 # Save the model
                 torch.save(net.state_dict(), f"{out_dir}/model_round_{server_round}.pth")
                 if server_round%5!=1 and os.path.exists(f"{out_dir}/model_round_{server_round-1}.pth"):
+                    print('DELETING OLD MODEL')
                     os.remove(f"{out_dir}/model_round_{server_round-1}.pth") #delete old model to save space
             return aggregated_parameters, aggregated_metrics
 
@@ -430,7 +609,19 @@ if __name__=='__main__':
         def __init__(self):
             self.config = {}
             self.parameters = None
+    
 
+    if args.dp=='fixed':
+        #says to use noise >=1.0 but no advice on clipping norm. The paper seemed to go up to 20. Bad results with everything so far
+        strategy = fl.server.strategy.DPFedAvgFixed(strategy, noise_multiplier=1.0, clip_norm=20, num_sampled_clients=args.num_clients, server_side_noising=True) 
+    elif args.dp=='adaptive':
+        #the adaptive one seems to start with much nicer defaults..!
+        strategy = fl.server.strategy.DPFedAvgAdaptive(strategy, noise_multiplier=1.0, num_sampled_clients=args.num_clients, server_side_noising=True) 
+        # strategy = fl.server.strategy.DifferentialPrivacyServerSideFixedClipping(strategy, noise_multiplier=1.0, clipping_norm=0.1, num_sampled_clients=args.num_clients)
+    elif args.dp=='opacus':
+        from opacus import PrivacyEngine
+
+        
     if args.num_clients==1:
         print('testing with one client, doing local debug run!')
         client = client_fn('0')
@@ -451,8 +642,8 @@ if __name__=='__main__':
             #     best_loss = loss
             #     torch.save(client.net.state_dict(), f"{out_dir}/best_loss.pth")
             torch.save(client.numpy_client.net.state_dict(), f"{out_dir}/model_round_{i}.pth")
-            # if os.path.exists(f"{out_dir}/model_round_{i-1}.pth"):
-            #     os.remove(f"{out_dir}/model_round_{i-1}.pth") #delete old model to save space
+            if os.path.exists(f"{out_dir}/model_round_{i-1}.pth"):
+                os.remove(f"{out_dir}/model_round_{i-1}.pth") #delete old model to save space
 
 
     else:

@@ -71,7 +71,7 @@ def trainer(args, train_loader, dev_loader, model, optimizer, criterion, epoch=1
     return model
 
 @torch.no_grad()
-def test(args, model, test_loader, epoch): 
+def test(args, model, test_loader, epoch, load_state_dict=True): 
     result_path = os.path.join(args.dataset,args.result_path)
     if os.path.exists(result_path):
         shutil.rmtree(result_path)
@@ -80,7 +80,8 @@ def test(args, model, test_loader, epoch):
     save_path = os.path.join(args.dataset,args.save_path)
     train_subjects_list = [i for i in args.train_subjects.split(" ")]
 
-    model.load_state_dict(torch.load(os.path.join(save_path, '{}_model.pth'.format(epoch))))
+    if load_state_dict: #else just take model that was passed, this is for used testing w random init
+        model.load_state_dict(torch.load(os.path.join(save_path, '{}_model.pth'.format(epoch))))
     model = model.to(torch.device("cuda"))
     model.eval()
     for audio, vertice, template, one_hot_all, file_name in test_loader:

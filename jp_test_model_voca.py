@@ -114,7 +114,7 @@ class test_dataset_wise():
 
     def run_test(self, model, data, logdir, dataset_to_eval, condition=2):
         model_name = os.path.basename(args.model_path)[:-4]
-        out_dir = os.path.join(logdir, f"eval_model_{model_name}_cond_{condition}")
+        out_dir = os.path.join(logdir, f"eval_model_{model_name}_train_idx_{args.train_idx}_cond_{condition}")
         os.makedirs(out_dir, exist_ok=True)
 
         test_data = data
@@ -123,6 +123,7 @@ class test_dataset_wise():
 
         ### process and dump the metrics
         metrics = process_result_dict(results_dict)
+        print(f'writing results to {out_dir}/results.json')
         with open(os.path.join(out_dir, 'results.json'), 'w') as file:
             file.write(json.dumps(metrics, indent=4))
 
@@ -161,6 +162,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='FaceFormer: Speech-Driven 3D Facial Animation with Transformers')
     parser.add_argument("--lr", type=float, default=0.0001, help='learning rate')
     parser.add_argument("--dataset", type=str, default="vocaset", help='vocaset or BIWI')
+    parser.add_argument("--dir", type=str, default='.', help='path to working dir')
+
     parser.add_argument("--vertice_dim", type=int, default=5023*3, help='number of vertices - 5023*3 for vocaset; 23370*3 for BIWI')
     parser.add_argument("--feature_dim", type=int, default=64, help='64 for vocaset; 128 for BIWI')
     parser.add_argument("--period", type=int, default=30, help='period in PPE - 30 for vocaset; 25 for BIWI')
@@ -176,7 +179,8 @@ if __name__ == "__main__":
        " FaceTalk_170904_00128_TA FaceTalk_170725_00137_TA FaceTalk_170915_00223_TA"
        " FaceTalk_170811_03274_TA FaceTalk_170913_03279_TA"
        " FaceTalk_170904_03276_TA FaceTalk_170912_03278_TA")
-    parser.add_argument("--val_subjects", type=str, default="FaceTalk_170811_03275_TA"
+    parser.add_argument("--all_train_subjects", type=str, default="FaceTalk_170728_03272_TA FaceTalk_170904_00128_TA FaceTalk_170725_00137_TA FaceTalk_170915_00223_TA FaceTalk_170811_03274_TA FaceTalk_170913_03279_TA FaceTalk_170904_03276_TA FaceTalk_170912_03278_TA")
+    parser.add_argument("--valid_subjects", type=str, default="FaceTalk_170811_03275_TA"
        " FaceTalk_170908_03277_TA")
     parser.add_argument("--test_subjects", type=str, default="FaceTalk_170809_00138_TA"
        " FaceTalk_170731_00024_TA")
@@ -186,19 +190,41 @@ if __name__ == "__main__":
     parser.add_argument('-r', '--render_results', default=False, action='store_true')
     parser.add_argument("--train_idx", type=int, default=-1, help='index of speaker to train on for individual run, -1 = train on all speakers')
     parser.add_argument('--test_random_initialisation', action='store_true', default=False)
+    parser.add_argument("--aggr", type=str, default="avg", help='avg | mask - which aggregation method to use')
     parser.add_argument("--wav2vec_path", type=str, default="/home/paz/data/wav2vec2-base-960h", help='wav2vec path for the faceformer model')
+    parser.add_argument("--data_split", type=str, default="vertical", help='vertical | horziontal - vertical=split on speakers, horzontal=split some of each train speaker for test and valid')
+    parser.add_argument("--model", type=str, default='faceformer', help='which model to train, faceformer or imitator')
 
     args = parser.parse_args()
     from faceformer import Faceformer
     from data_loader import get_dataloaders
 
-    #build model
-    train_subjects_list = args.train_subjects.split()
-    if args.train_idx!=-1:
-        args.train_subjects = train_subjects_list[args.train_idx]
+    if args.data_split=='horizontal':
+        print('HORIZONTAL DATA SPLIT, setting vaild and test subjects to train subjects')
+        print('data will be split 60/20/20 within speakers')
+        # args.train_subjects = ' '.join([args.train_subjects, args.valid_subjects, args.test_subjects])
+        args.valid_subjects=args.train_subjects
+        args.test_subjects=args.train_subjects
 
     #build model
-    model = Faceformer(args)
+    train_subjects_list = args.train_subjects.split()
+    if args.aggr=='avg':
+        if args.train_idx!=-1:
+            args.train_subjects = train_subjects_list[args.train_idx]
+
+    #build model
+    if args.model=='faceformer':
+        from faceformer import Faceformer
+        model = Faceformer(args)
+    elif args.model=='imitator':
+        print('loading imitator')
+        from imitator.models.nn_model_jp import imitator
+        #might have to do some funky stuff with the args first
+        args.num_identity_classes = len(args.all_train_subjects.split())
+        args.num_dec_layers = 5
+        args.fixed_channel = True
+        args.style_concat = False
+        model = imitator(args)
 
     #load model
     if args.test_random_initialisation:
@@ -206,13 +232,26 @@ if __name__ == "__main__":
     else:
         print(f'loading model: {args.model_path}')
         state_dict = torch.load(args.model_path)
-        model.load_state_dict(state_dict, strict=True)
+        if 'state_dict' in state_dict.keys():
+            state_dict = state_dict['state_dict'] #for pretrained models
+            state_dict = {'.'.join(x.split('.')[1:]): y for x, y in state_dict.items()} #remove nn_model. from names
+            model.load_state_dict(state_dict)
+        else:
+            model.load_state_dict(state_dict, strict=True)
         print("model parameters: ", count_parameters(model))
 
     
     assert torch.cuda.is_available()
     model.to(torch.device('cuda'))
-    dataset = get_dataloaders(args)
+
+    # if args.aggr=='avg':
+    #     train_subjects_subset = train_subjects_list[args.train_idx]
+    # else:
+    #     train_subjects_subset=None
+    train_subjects_subset = train_subjects_list[args.train_idx]
+    
+    dataset = get_dataloaders(args, train_subjects_subset, splits=['test'])
+
     #save the test outputs to result/ folder
     data = dataset['test']
 

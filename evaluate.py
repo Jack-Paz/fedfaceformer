@@ -7,7 +7,8 @@ from data_loader import get_dataloaders
 import os
 import pickle
 
-
+#THIS SCRIPT EVALUATES ALL IDENTITIES ON THE LIP L2 TASK, 
+#should probably just use the jp_test_model_voca script for evaluating tall the full metrics
 
 
 def lip_max_l2(vertice_dim, predict, real, mask):
@@ -37,6 +38,8 @@ def main():
     parser = argparse.ArgumentParser(description='FaceFormer: Speech-Driven 3D Facial Animation with Transformers')
     parser.add_argument("--lr", type=float, default=0.0001, help='learning rate')
     parser.add_argument("--dataset", type=str, default="vocaset", help='vocaset or BIWI')
+    parser.add_argument("--dir", type=str, default='.', help='path to working dir')
+
     parser.add_argument("--vertice_dim", type=int, default=5023*3, help='number of vertices - 5023*3 for vocaset; 23370*3 for BIWI')
     parser.add_argument("--feature_dim", type=int, default=64, help='64 for vocaset; 128 for BIWI')
     parser.add_argument("--period", type=int, default=30, help='period in PPE - 30 for vocaset; 25 for BIWI')
@@ -52,18 +55,34 @@ def main():
        " FaceTalk_170904_00128_TA FaceTalk_170725_00137_TA FaceTalk_170915_00223_TA"
        " FaceTalk_170811_03274_TA FaceTalk_170913_03279_TA"
        " FaceTalk_170904_03276_TA FaceTalk_170912_03278_TA")
-    parser.add_argument("--val_subjects", type=str, default="FaceTalk_170811_03275_TA"
+    parser.add_argument("--valid_subjects", type=str, default="FaceTalk_170811_03275_TA"
        " FaceTalk_170908_03277_TA")
     parser.add_argument("--test_subjects", type=str, default="FaceTalk_170809_00138_TA"
        " FaceTalk_170731_00024_TA")
     parser.add_argument('--model_path', type=str, default='vocaset/save_backup/100_model.pth')
-    parser.add_argument('--test_random_initialisation', type=bool, action='store_true', default=False)
+    parser.add_argument('--test_random_initialisation', action='store_true', default=False)
     parser.add_argument("--wav2vec_path", type=str, default="/home/paz/data/wav2vec2-base-960h", help='wav2vec path for the faceformer model')
+
+    parser.add_argument("--data_split", type=str, default="vertical", help='vertical | horziontal - vertical=split on speakers, horzontal=split some of each train speaker for test and valid')
+
+    # parser.add_argument("--wav2vec_path", type=str, default="/home/paz/data/wav2vec2-base-960h", help='wav2vec path for the faceformer model')
+
+    parser.add_argument("--model", type=str, default='faceformer', help='which model to train, faceformer or imitator')
 
     args = parser.parse_args()
 
     #build model
-    model = Faceformer(args)
+    if args.model=='faceformer':
+        from faceformer import Faceformer
+        model = Faceformer(args)
+    elif args.model=='imitator':
+        from imitator.models.nn_model_jp import imitator
+        #might have to do some funky stuff with the args first
+        args.num_identity_classes = len(args.train_subjects.split())
+        args.num_dec_layers = 5
+        args.fixed_channel = True
+        args.style_concat = False
+        model = imitator(args)
 
     #load model
     if args.test_random_initialisation:
@@ -83,7 +102,7 @@ def main():
 
     #save the test outputs to result/ folder
     print('testing model')
-    test(args, model, dataset["test"], epoch=args.max_epoch)
+    test(args, model, dataset["test"], epoch=args.max_epoch, load_state_dict=False)
 
     #evaluate outputs
     identity_to_result = {}

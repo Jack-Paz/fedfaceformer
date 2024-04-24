@@ -38,78 +38,6 @@ class Dataset(data.Dataset):
     def __len__(self):
         return self.len
 
-# def read_data(args):
-#     print("Loading data...")
-#     data = defaultdict(dict)
-#     train_data = []
-#     valid_data = []
-#     test_data = []
-
-#     audio_path = os.path.join(args.dataset, args.wav_path)
-#     vertices_path = os.path.join(args.dataset, args.vertices_path)
-#     # processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
-#     # processor = Wav2Vec2Processor.from_pretrained("/home/paz/data/wav2vec2-base-960h")
-#     processor = Wav2Vec2Processor.from_pretrained(args.wav2vec_path)
-#     template_file = os.path.join(args.dataset, args.template_file)
-#     with open(template_file, 'rb') as fin:
-#         templates = pickle.load(fin,encoding='latin1')
-    
-#     for r, ds, fs in os.walk(audio_path):
-#         # fs_list = tqdm(fs)
-#         fs_list = fs
-#         for f in fs_list:
-#             if f.endswith("wav"):
-#                 wav_path = os.path.join(r,f)
-#                 speech_array, sampling_rate = librosa.load(wav_path, sr=16000)
-#                 input_values = np.squeeze(processor(speech_array,sampling_rate=16000).input_values)
-#                 key = f.replace("wav", "npy")
-#                 data[key]["audio"] = input_values
-#                 subject_id = "_".join(key.split("_")[:-1])
-#                 temp = templates[subject_id]
-#                 data[key]["name"] = f
-#                 data[key]["template"] = temp.reshape((-1)) 
-#                 vertice_path = os.path.join(vertices_path,f.replace("wav", "npy"))
-#                 if not os.path.exists(vertice_path):
-#                     del data[key]
-#                 else:
-#                     if args.dataset == "vocaset":
-#                         data[key]["vertice"] = np.load(vertice_path,allow_pickle=True)[::2,:]#due to the memory limit
-#                     elif args.dataset == "BIWI":
-#                         data[key]["vertice"] = np.load(vertice_path,allow_pickle=True)
-
-#     subjects_dict = {}
-#     subjects_dict["train"] = [i for i in args.train_subjects.split(" ")]
-#     subjects_dict["val"] = [i for i in args.val_subjects.split(" ")]
-#     subjects_dict["test"] = [i for i in args.test_subjects.split(" ")]
-
-#     splits = {'vocaset':{'train':range(1,41),'val':range(21,41),'test':range(21,41)},
-#      'BIWI':{'train':range(1,33),'val':range(33,37),'test':range(37,41)}}
-   
-#     for k, v in data.items():
-#         subject_id = "_".join(k.split("_")[:-1])
-#         sentence_id = int(k.split(".")[0][-2:])
-#         if subject_id in subjects_dict["train"] and sentence_id in splits[args.dataset]['train']:
-#             train_data.append(v)
-#         if subject_id in subjects_dict["val"] and sentence_id in splits[args.dataset]['val']:
-#             valid_data.append(v)
-#         if subject_id in subjects_dict["test"] and sentence_id in splits[args.dataset]['test']:
-#             test_data.append(v)
-
-#     print(len(train_data), len(valid_data), len(test_data))
-#     return train_data, valid_data, test_data, subjects_dict
-
-# def get_dataloaders(args, return_test=True):
-#     dataset = {}
-#     train_data, valid_data, test_data, subjects_dict = read_data(args)
-#     train_data = Dataset(train_data,subjects_dict,"train")
-#     dataset["train"] = data.DataLoader(dataset=train_data, batch_size=1, shuffle=True)
-#     valid_data = Dataset(valid_data,subjects_dict,"val")
-#     dataset["valid"] = data.DataLoader(dataset=valid_data, batch_size=1, shuffle=False)
-#     if return_test:
-#         test_data = Dataset(test_data,subjects_dict,"test")
-#         dataset["test"] = data.DataLoader(dataset=test_data, batch_size=1, shuffle=False)
-#     return dataset
-
 def read_data(args, subjects, split):
     ''' Reads the data for the given subjects. 
         split determines what the full subject list is (where len(subjects) < len(split_subjects) eg for the federated learning setting with devices > 1)  
@@ -120,12 +48,18 @@ def read_data(args, subjects, split):
     all_subjects = eval(f'args.{split}_subjects') #train valid or test. 
     if subjects==None:
         subjects=all_subjects #for test and valid, always use all subjects
-    audio_path = os.path.join(args.dataset, args.wav_path)
-    vertices_path = os.path.join(args.dataset, args.vertices_path)
+    if args.dir:
+        dataset_path = os.path.join(args.dir, args.dataset)
+    audio_path = os.path.join(dataset_path, args.wav_path)
+    vertices_path = os.path.join(dataset_path, args.vertices_path)
     processor = Wav2Vec2Processor.from_pretrained(args.wav2vec_path)
-    template_file = os.path.join(args.dataset, args.template_file)
-    with open(template_file, 'rb') as fin:
-        templates = pickle.load(fin,encoding='latin1')
+    template_file = os.path.join(dataset_path, args.template_file)
+    # with open(template_file, 'rb') as fin:
+    try:
+        templates = pickle.load(open(template_file, 'rb'))
+    except UnicodeDecodeError:
+        templates = pickle.load(open(template_file, 'rb'), encoding='latin1')
+
     
     for r, ds, fs in os.walk(audio_path):
         # fs_list = tqdm(fs)
@@ -150,13 +84,38 @@ def read_data(args, subjects, split):
                 else:
                     if args.dataset == "vocaset":
                         data[key]["vertice"] = np.load(vertice_path,allow_pickle=True)[::2,:]#due to the memory limit
+                    elif args.dataset == "hdtf":
+                        data[key]["vertice"] = np.load(vertice_path,allow_pickle=True)[::2,:].reshape(-1, int(args.vertice_dim))
                     elif args.dataset == "BIWI":
                         data[key]["vertice"] = np.load(vertice_path,allow_pickle=True)
     subjects_dict = {}
     subjects_dict[split] = [i for i in all_subjects.split(" ")]
 
-    splits = {'vocaset':{'train':range(1,41),'valid':range(21,41),'test':range(21,41)},
-     'BIWI':{'train':range(1,33),'valid':range(33,37),'test':range(37,41)}}
+    if args.data_split=='horizontal':
+        # vocaset_idx = np.arange(1,41)
+        # n_train = int(len(vocaset_idx)*0.6) #60%
+        # n_valid = int(len(vocaset_idx)*0.8) #20%
+        # n_test = int(len(vocaset_idx)*1) #20%
+        # assert n_train+n_valid+n_test==len(vocaset_idx)
+        # train_idx = vocaset_idx[:n_train]
+        # valid_idx = vocaset_idx[n_train:n_valid]
+        # test_idx = vocaset_idx[n_valid:n_test]
+        # splits = {'vocaset':{'train':train_idx,'valid':valid_idx,'test':test_idx}, 'BIWI':{'train':range(1,33),'valid':range(33,37),'test':range(37,41)}}
+        splits = {'vocaset':{'train':range(1,25),'valid':range(25,33),'test':range(33,41)}, 'BIWI':{'train':range(1,33),'valid':range(33,37),'test':range(37,41)}, 'hdtf':{'train':range(1,8),'valid':range(8,10),'test':range(10,13)}}
+
+    elif args.data_split=='vertical':
+        if args.dataset=='vocaset':
+            # print('WARNING: DEFAULT SPLIT ONLY USES HALF THE TEST AND VALID SETS!') #used to be (21,41) - fixed
+            splits = {'vocaset':{'train':range(1,41),'valid':range(1,41),'test':range(1,41)}, 
+                  'BIWI':{'train':range(1,33),'valid':range(33,37),'test':range(37,41)}, 
+                  'hdtf': {'train':range(1,13),'valid':range(1,13),'test':range(1,13)}}
+
+    elif args.data_split=='stg':
+        #imitator style adaptation, just take a few utts (taken from config)
+        splits = {'vocaset':{'train':range(1,5),'valid':range(19,21),'test':range(21,41)}}
+
+    else:
+        raise Exception('args.data_split unknown')
     for k, v in data.items():
         subject_id = "_".join(k.split("_")[:-1])
         sentence_id = int(k.split(".")[0][-2:])
@@ -167,15 +126,22 @@ def read_data(args, subjects, split):
     return dataset_data, subjects_dict
 
 def get_dataloaders(args, train_subjects_subset=None, splits=['train','valid','test']):
-    n_train_speakers = len(args.train_subjects.split())
-    if train_subjects_subset==None:
-        train_subjects_subset = args.train_subjects
+    if args.model.startswith('imitator'):
+        n_train_speakers = len(args.all_train_subjects.split())
+        if train_subjects_subset==None:
+            train_subjects_subset = args.all_train_subjects
+
+    else:
+        n_train_speakers = len(args.train_subjects.split())
+        if train_subjects_subset==None:
+            train_subjects_subset = args.train_subjects
     dataset = {}
     for split in splits:
         if split=='train':
             subjects = train_subjects_subset
         else:
             subjects = None
+        # subjects = train_subjects_subset #filters for test and valid also - desirable?
         dataset_data, subjects_dict = read_data(args, subjects, split=split)
         dataset_data = Dataset(dataset_data, subjects_dict, split, n_train_speakers)
         shuffle = False if split=='train' else False
