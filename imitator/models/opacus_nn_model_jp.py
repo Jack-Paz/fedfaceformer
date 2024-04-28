@@ -256,11 +256,13 @@ class imitator(nn.Module):
 
         self.train_subjects = args.train_subjects.split(" ")
         self.dataset = args.dataset
-        if args.dp=='opacus':
-            print('importing opacus wav2vec')
-            from imitator.models.opacus_wav2vec import Wav2Vec2Model
-        else:
-            from imitator.models.wav2vec import Wav2Vec2Model
+        # if args.dp=='opacus':
+            
+            # print('importing opacus wav2vec')
+            # from imitator.models.opacus_wav2vec import Wav2Vec2Model
+        # else:
+            # from imitator.models.wav2vec import Wav2Vec2Model
+        from imitator.models.wav2vec import Wav2Vec2Model
 
         if os.getenv('WAV2VEC_PATH'):
             wav2vec_path = os.getenv('WAV2VEC_PATH')
@@ -272,7 +274,10 @@ class imitator(nn.Module):
             self.audio_encoder = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base-960h")
         # print('BREAKING THE CODE JUST TO TEST, DELET')
         # self.audio_encoder = GradSampleModule(nn.Linear(16000, args.feature_dim))
-
+        if args.dp=='opacus':
+            for param in self.audio_encoder.parameters():
+                param.requires_grad = False #freeze wav2vec
+        
         if not hasattr(args, 'max_seq_len'):
             args.max_seq_len = 600
 
@@ -308,7 +313,6 @@ class imitator(nn.Module):
         frame_num = vertice.shape[1]
         hidden_states = self.audio_encoder(audio, self.dataset, frame_num=frame_num).last_hidden_state
         # breakpoint()
-        hidden_states = torch.zeros(hidden_states.shape) #TESTING BYPASSING THE AUDIO ENCODER 
         hidden_states = self.audio_feature_map(hidden_states)
     
         for i in range(frame_num):

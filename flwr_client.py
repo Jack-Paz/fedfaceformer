@@ -86,6 +86,26 @@ def compute_auxillary_losses(predicted_mesh, gt_mesh, custom_loss):
     }
     return loss_dict
 
+def accumulate_and_noise(accumulated_grads, noise_scale=1.0):
+    noised_grads = []
+    for grad_list in accumulated_grads:
+        if not grad_list:
+            noised_grads.append(None) #NOT SURE IF ZERO IS APPROPRIATE?
+            continue
+        # Stack gradients along a new dimension, compute mean across this dimension
+        stacked_grads = torch.stack(grad_list)
+        mean_grad = torch.mean(stacked_grads, dim=0)
+
+        # Add Gaussian noise
+        noise = torch.randn_like(mean_grad) * noise_scale
+        noised_grads.append(mean_grad + noise)
+
+    return noised_grads
+
+def calculate_epsilon(steps, sigma, sensitivity, delta):
+    return (sensitivity / sigma) * np.sqrt(2 * np.log(1.25 / delta)) * np.sqrt(steps)
+
+
 def train(args, train_loader, model, optimizer, criterion, custom_loss, privacy_engine, epoch=100):
     iteration = 0
     epoch_losses = []
@@ -115,12 +135,32 @@ def train(args, train_loader, model, optimizer, criterion, custom_loss, privacy_
 
             loss.backward()
             loss_log.append(loss.item())
-            if i % args.gradient_accumulation_steps==0:
-                optimizer.step()
-                optimizer.zero_grad()
+
             if args.dp=='opacus':
                 epsilon = privacy_engine.accountant.get_epsilon(delta=args.delta)
                 print(f"(ε = {epsilon:.2f}, δ = {args.delta})")
+            elif args.dp=='basic':
+                accumulated_grads = [[] for _ in model.parameters()]  # List of lists for each parameter
+                for pid, p in enumerate(model.parameters()):
+                    if (p.grad is not None) and (len(p.grad)>0):
+                        per_sample_grad = p.grad.detach().clone()
+                        torch.nn.utils.clip_grad_norm_(per_sample_grad, max_norm=1.0)
+                        accumulated_grads[pid].append(per_sample_grad)
+                model.zero_grad()
+                noise_scale = 1
+                aggregated_and_noised_grads = accumulate_and_noise(accumulated_grads, noise_scale=noise_scale)
+                for param, agg_grad in zip(model.parameters(), aggregated_and_noised_grads):
+                    param.grad = agg_grad
+                    
+                sigma = 1.0  # Standard deviation of the Gaussian noise
+                sensitivity = 1.0  # Assuming a clipping norm of 1
+                delta = 1e-3  # Acceptable failure probability of the privacy guarantee
+                epsilon = calculate_epsilon(iteration, sigma, sensitivity, delta)
+                print(f"Approximate ε after {iteration} steps: {epsilon}")
+
+            if i % args.gradient_accumulation_steps==0:
+                optimizer.step()
+                optimizer.zero_grad()
 
         epoch_loss = np.mean(loss_log)
         epoch_losses.append(epoch_loss)
@@ -295,7 +335,7 @@ if __name__=='__main__':
 
     parser.add_argument("--wav2vec_path", type=str, default="/home/paz/data/wav2vec2-base-960h", help='wav2vec path for the faceformer model')
     parser.add_argument("--aggr", type=str, default="avg", help='avg | mask - which aggregation method to use')
-    parser.add_argument("--dp", type=str, default="none", help='none | fixed | adaptive | opacus - which dp method to use')
+    parser.add_argument("--dp", type=str, default="none", help='none | fixed | adaptive | opacus | basic - which differential privacy method to use')
     parser.add_argument("--data_split", type=str, default="vertical", help='vertical | horziontal - vertical=split on speakers, horzontal=split some of each train speaker for test and valid')
     parser.add_argument("--train_idx", type=int, default=-1, help='index of speaker to train on for individual run, -1 = train on all speakers')
     parser.add_argument("--condition_idx", type=int, default=2, help='for imitator runs, which speaker to initialise the personalisation layer')
@@ -327,6 +367,7 @@ if __name__=='__main__':
         from imitator.models.opacus_nn_model_jp import imitator
     else:
         from imitator.models.nn_model_jp import imitator
+    # from imitator.models.nn_model_jp import imitator
 
 
 
