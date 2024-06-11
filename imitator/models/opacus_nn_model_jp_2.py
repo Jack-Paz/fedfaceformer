@@ -3,8 +3,12 @@ import torch
 import torch.nn as nn
 import math
 # from imitator.models.wav2vec import Wav2Vec2Model
-from wav2vec import Wav2Vec2Model
+
 from collections import defaultdict
+
+from opacus.grad_sample import GradSampleModule
+from opacus.layers.dp_multihead_attention import DPMultiheadAttention
+
 
 class struct(object):
     def __init__(self, **kwargs):
@@ -111,7 +115,6 @@ class motion_decoder(nn.Module):
         self.style_concat = style_concat
         if style_concat:
             in_channels = 2 * in_channels
-
         if num_dec_layers == 1:
             self.decoder = nn.Sequential()
             final_out_layer = nn.Linear(in_channels, out_channels)
@@ -165,6 +168,96 @@ class motion_decoder(nn.Module):
 
         return self.decoder(vertice_out_w_style)
 
+def swap_dims(x):
+    #swap first and second dims for batch_first
+    return x.reshape(x.shape[1], x.shape[0], x.shape[2])
+
+class OpacusDecoderLayer(nn.Module):
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation=nn.functional.relu, layer_norm_eps=1e-5, batch_first=False, norm_first=False, bias=True, device=None, dtype=None):
+
+        factory_kwargs = {'device': device, 'dtype': dtype}
+        super().__init__()
+        self.batch_first = batch_first
+        self.self_attn = DPMultiheadAttention(d_model, nhead, dropout=dropout, bias=bias, batch_first=self.batch_first)
+        self.multihead_attn = DPMultiheadAttention(d_model, nhead, dropout=dropout, bias=bias, batch_first=self.batch_first)
+        # Implementation of Feedforward model
+        self.linear1 = nn.Linear(d_model, dim_feedforward, bias=bias, **factory_kwargs)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model, bias=bias, **factory_kwargs)
+
+        self.norm_first = norm_first
+        self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps, **factory_kwargs)
+        self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps, **factory_kwargs)
+        self.norm3 = nn.LayerNorm(d_model, eps=layer_norm_eps, **factory_kwargs)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.dropout3 = nn.Dropout(dropout)
+
+        self.activation = activation
+
+    def forward(
+        self,
+        tgt,
+        memory,
+        tgt_mask= None,
+        memory_mask= None,
+        tgt_key_padding_mask= None,
+        memory_key_padding_mask= None,
+        tgt_is_causal=False,
+        memory_is_causal= False):
+        # see Fig. 1 of https://arxiv.org/pdf/2002.04745v1.pdf
+
+        x = tgt
+        if self.norm_first:
+            x = x + self._sa_block(self.norm1(x), tgt_mask, tgt_key_padding_mask, tgt_is_causal)
+            x = x + self._mha_block(self.norm2(x), memory, memory_mask, memory_key_padding_mask, memory_is_causal)
+            x = x + self._ff_block(self.norm3(x))
+        else:
+            x = self.norm1(x + self._sa_block(x, tgt_mask, tgt_key_padding_mask, tgt_is_causal))
+            x = self.norm2(x + self._mha_block(x, memory, memory_mask, memory_key_padding_mask, memory_is_causal))
+            x = self.norm3(x + self._ff_block(x))
+
+        return x
+
+
+    # self-attention block
+    def _sa_block(self, x,
+                attn_mask, key_padding_mask, is_causal: bool = False):
+        # x = self.self_attn(x, x, x,
+        #                 attn_mask=attn_mask,
+        #                 key_padding_mask=key_padding_mask,
+        #                 is_causal=is_causal,
+        #                 need_weights=False)[0]
+        # attn_mask = swap_dims(attn_mask) #does it need to be swapped?
+        print('in sa block')
+        x = self.self_attn(x, x, x, attn_mask=attn_mask, key_padding_mask=key_padding_mask, need_weights=False)[0]
+        # x = self.dropout1(x)
+        return x
+
+    # multihead attention block
+    def _mha_block(self, x, mem,
+                attn_mask, key_padding_mask, is_causal: bool = False):
+        # x = self.multihead_attn(x, mem, mem,
+        #                         attn_mask=attn_mask,
+        #                         key_padding_mask=key_padding_mask,
+        #                         is_causal=is_causal,
+        #                         need_weights=False)[0]
+        # attn_mask = swap_dims(attn_mask)
+        print('in mha block')
+        # mem = swap_dims(mem)
+        x = self.multihead_attn(x, mem, mem, attn_mask=attn_mask, key_padding_mask=key_padding_mask,need_weights=False)[0]
+        return self.dropout2(x)
+
+    # feed forward block
+    def _ff_block(self, x):
+        # if self.batch_first:
+        #     x = swap_dims(x)
+        x = self.linear2(self.dropout(self.activation(self.linear1(x))))
+        # if self.batch_first:
+        #     x = swap_dims(x)
+        return self.dropout3(x)
+
+
 class imitator(nn.Module):
     def __init__(self, args):
         super(imitator, self).__init__()
@@ -178,6 +271,13 @@ class imitator(nn.Module):
 
         self.train_subjects = args.train_subjects.split(" ")
         self.dataset = args.dataset
+        # if args.dp=='opacus':
+            
+            # print('importing opacus wav2vec')
+            # from imitator.models.opacus_wav2vec import Wav2Vec2Model
+        # else:
+            # from imitator.models.wav2vec import Wav2Vec2Model
+        from imitator.models.wav2vec import Wav2Vec2Model
 
         if os.getenv('WAV2VEC_PATH'):
             wav2vec_path = os.getenv('WAV2VEC_PATH')
@@ -187,22 +287,26 @@ class imitator(nn.Module):
             self.audio_encoder = Wav2Vec2Model.from_pretrained(wav2vec_path)
         else:
             self.audio_encoder = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base-960h")
+        # print('BREAKING THE CODE JUST TO TEST, DELET')
+        # self.audio_encoder = GradSampleModule(nn.Linear(16000, args.feature_dim))
         if args.dp=='opacus':
             print('WARNING: FREEZING WAV2VEC')
             for param in self.audio_encoder.parameters():
                 param.requires_grad = False #freeze wav2vec
-
+        
         if not hasattr(args, 'max_seq_len'):
             args.max_seq_len = 600
 
-        self.audio_encoder.feature_extractor._freeze_parameters()
+        # self.audio_encoder.feature_extractor._freeze_parameters()
         self.audio_feature_map = nn.Linear(768, args.feature_dim)
         if hasattr(args, 'wav2vec_static_features'):
             self.audio_encoder.generate_static_audio_features = args.wav2vec_static_features # default value is false
 
         self.PPE = PositionalEncoding(args.feature_dim, max_len=args.max_seq_len)
-        self.causal_mh_mask = casual_mask(n_head=4*args.batch_size, max_seq_len=args.max_seq_len, period=args.max_seq_len) #jp added batch size
-        decoder_layer = nn.TransformerDecoderLayer(d_model=args.feature_dim, nhead=4, dim_feedforward=2*args.feature_dim, batch_first=True)
+        self.causal_mh_mask = casual_mask(n_head=32, max_seq_len=args.max_seq_len, period=args.max_seq_len)
+        # this thing needs bsz * 4 heads, but batches are random sized, just make it 32 and hope bsz never greater than 8??
+        decoder_layer = OpacusDecoderLayer(d_model=args.feature_dim, nhead=4, dim_feedforward=2*args.feature_dim, batch_first=True)
+        
         self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=1)
         
         # style embedding
@@ -210,38 +314,37 @@ class imitator(nn.Module):
         self.transformer_ff_features = defaultdict(def_value)
         self.args = args
 
-        self.vertice_map_r = motion_decoder(in_channels=args.feature_dim, out_channels=args.vertice_dim, num_dec_layers=args.num_dec_layers, fixed_channel=args.fixed_channel, style_concat=args.style_concat)
+        self.vertice_map_r = motion_decoder(in_channels=args.feature_dim, out_channels=args.vertice_dim,
+                                            num_dec_layers=args.num_dec_layers, fixed_channel=args.fixed_channel,
+                                            style_concat=args.style_concat)
 
     def forward(self, audio, template, vertice=None, one_hot=None, criterion=None, teacher_forcing=True, test_dataset=None):
-        #jp edit to take larger batches
+        #vertice one hot and criterion not needed for testing
         self.device = audio.device
+        if len(audio)==0:
+            return torch.FloatTensor(0), [0] #happens during opacus training bc of random batches
         # tgt_mask: :math:`(T, T)`.
         # memory_mask: :math:`(T, S)`.
-        template = template.unsqueeze(1)  # (bsz, 1, V*3)
-        obj_embedding = self.obj_vector(one_hot)  # (bsz, feature_dim)
-        if test_dataset is None:
-            dataset = self.dataset
-            frame_num = vertice.shape[1]
-            hidden_states = self.audio_encoder(audio, self.dataset, frame_num=frame_num).last_hidden_state #(bsz, n_frames, hidden_dim)
-        else:
-            dataset=test_dataset
-            hidden_states = self.audio_encoder(audio, test_dataset).last_hidden_state
-            frame_num = hidden_states.shape[1]
-
+        template = template.unsqueeze(1)  # (1,1, V*3)
+        obj_embedding = self.obj_vector(one_hot)  # (1, feature_dim)
+        frame_num = vertice.shape[1]
+        hidden_states = self.audio_encoder(audio, self.dataset, frame_num=frame_num).last_hidden_state
+        # breakpoint()
         hidden_states = self.audio_feature_map(hidden_states)
-
+        dataset = self.dataset if test_dataset is None else test_dataset
         for i in range(frame_num):
             if i==0:
-                vertice_emb = obj_embedding.unsqueeze(1) # (bsz,1,feature_dim)
+                vertice_emb = obj_embedding.unsqueeze(1) # (1,1,feature_dim)
                 style_emb = vertice_emb
                 start_token = torch.zeros_like(vertice_emb)
                 vertice_input = self.PPE(start_token)
             else:
                 vertice_input = self.PPE(vertice_emb)
+    
             # get the masks
             tgt_mask = self.causal_mh_mask[:audio.shape[0]*4, :vertice_input.shape[1], :vertice_input.shape[1]].clone().detach().to(device=self.device) # JP added the bsz computation 
-            # But its always size (:, 1, 1) so why the rest of the vertice_input.shape nonsense? 
             memory_mask = enc_dec_mask(self.device, dataset, vertice_input.shape[1], hidden_states.shape[1])
+            print('about to go into transformer decoder')
             gen_viseme_feat = self.transformer_decoder(vertice_input, hidden_states, tgt_mask=tgt_mask, memory_mask=memory_mask)
             new_output = gen_viseme_feat[:,-1,:].unsqueeze(1)
             vertice_emb = torch.cat((vertice_emb, new_output), 1)
@@ -251,8 +354,8 @@ class imitator(nn.Module):
         vertice_out_w_style = vertice_out_w_style + template
         if test_dataset is not None:
             return vertice_out_w_style
+        
         loss = criterion(vertice_out_w_style, vertice) # (batch, seq_len, V*3)
-
         loss = torch.mean(loss)
 
         # set the current epoch viseme feat
@@ -261,6 +364,7 @@ class imitator(nn.Module):
         return loss, vertice_out_w_style
 
     def style_forward(self, audio, seq_name, template, vertice, one_hot, criterion, teacher_forcing=False):
+
         assert len(one_hot.shape) == 2
 
         self.device = audio.device
@@ -290,10 +394,7 @@ class imitator(nn.Module):
                 tgt_mask = tgt_mask.clone().detach().to(device=self.device)
                 memory_mask = enc_dec_mask(self.device, self.dataset, vertice_input.shape[1], hidden_states.shape[1])
                 ## transformer decoder
-                gen_viseme_feat = self.transformer_decoder(vertice_input,
-                                                                hidden_states,
-                                                                tgt_mask=tgt_mask,
-                                                                memory_mask=memory_mask)
+                gen_viseme_feat = self.transformer_decoder(vertice_input,hidden_states,tgt_mask=tgt_mask,memory_mask=memory_mask)
                 new_output = gen_viseme_feat[:, -1, :].unsqueeze(1)
                 vertice_emb = torch.cat((vertice_emb, new_output), 1)
 
@@ -345,52 +446,4 @@ class imitator(nn.Module):
         # gen_viseme_feat = torch.rand_like(gen_viseme_feat)
         vertice_out_w_style = self.vertice_map_r(gen_viseme_feat, style_emb)
         vertice_out = vertice_out_w_style + template
-        return vertice_out
-
-    def return_hidden_state(self, audio, template, one_hot, layer_idx=-1, test_dataset=None):
-        #return model internal states for t-sne computation
-        layer_idxs = [0,1,2,3]
-        lid = layer_idxs[layer_idx]
-        #where to return from: 0=audio encoder, 1=viseme decoder, 2=viseme decoder + style linear, 3=the motion decoder (before adding template?)
-        test_dataset = self.dataset if test_dataset is None else test_dataset
-
-        self.device = audio.device
-        template = template.unsqueeze(1) # (1,1, V*3)
-        obj_embedding = self.obj_vector(one_hot)
-
-        hidden_states = self.audio_encoder(audio, test_dataset).last_hidden_state
-        frame_num = hidden_states.shape[1]
-        hidden_states = self.audio_feature_map(hidden_states)
-        if lid==0:
-            return hidden_states
-        # generate the transformer features
-        for i in range(frame_num):
-            if i==0:
-                vertice_emb = obj_embedding.unsqueeze(1)  # (1,1,feature_dim)
-                style_emb = vertice_emb
-                start_token = torch.zeros_like(vertice_emb)
-                #add zeros instead of style embedding
-                vertice_input = self.PPE(start_token)
-            else:
-                vertice_input = self.PPE(vertice_emb)
-
-            # get the masks
-            tgt_mask = self.causal_mh_mask[:audio.shape[0]*4, :vertice_input.shape[1], :vertice_input.shape[1]].clone().detach().to(device=self.device) # JP added the bsz computation 
-            memory_mask = enc_dec_mask(self.device, test_dataset, vertice_input.shape[1], hidden_states.shape[1])
-            # run the decoder
-            gen_viseme_feat = self.transformer_decoder(vertice_input, hidden_states, tgt_mask=tgt_mask, memory_mask=memory_mask)
-            # use the features without style as input to the network
-            new_output = gen_viseme_feat[:,-1,:].unsqueeze(1)
-            vertice_emb = torch.cat((vertice_emb, new_output), 1)
-        if lid==1:
-            return gen_viseme_feat
-        if lid==2:
-            return gen_viseme_feat + style_emb
-        # gen_viseme_feat = torch.rand_like(gen_viseme_feat)
-        vertice_out_w_style = self.vertice_map_r(gen_viseme_feat, style_emb)
-        # if lid==3:
-        #     return vertice_out_w_style
-        vertice_out = vertice_out_w_style + template
-        if lid==3:
-            return vertice_out
         return vertice_out

@@ -12,7 +12,7 @@ import librosa
 
 class Dataset(data.Dataset):
     """Custom data.Dataset compatible with data.DataLoader."""
-    def __init__(self, data,subjects_dict,data_type="train",n_train_speakers=8):
+    def __init__(self, data,subjects_dict, filename_to_fileid, fileid_to_filename, data_type="train",n_train_speakers=8):
         self.data = data
         self.len = len(self.data)
         self.subjects_dict = subjects_dict
@@ -20,11 +20,14 @@ class Dataset(data.Dataset):
         # if self.data_type == "train":
         #     n_train_speakers = len(subjects_dict["train"])
         self.one_hot_labels = np.eye(n_train_speakers)
+        self.filename_to_fileid = filename_to_fileid
+        self.fileid_to_filename = fileid_to_filename
 
     def __getitem__(self, index):
         """Returns one data pair (source and target)."""
         # seq_len, fea_dim
         file_name = self.data[index]["name"]
+        fileid = self.filename_to_fileid[file_name[:-4]]
         audio = self.data[index]["audio"]
         vertice = self.data[index]["vertice"]
         template = self.data[index]["template"]
@@ -33,7 +36,7 @@ class Dataset(data.Dataset):
             one_hot = self.one_hot_labels[self.subjects_dict["train"].index(subject)]
         else:
             one_hot = self.one_hot_labels
-        return torch.FloatTensor(audio),torch.FloatTensor(vertice), torch.FloatTensor(template), torch.FloatTensor(one_hot), file_name
+        return torch.FloatTensor(audio),torch.FloatTensor(vertice), torch.FloatTensor(template), torch.FloatTensor(one_hot), torch.LongTensor([fileid])
 
     def __len__(self):
         return self.len
@@ -45,6 +48,8 @@ def read_data(args, subjects, split):
     print(f"Loading data split {split}...")
     data = defaultdict(dict)
     dataset_data = []
+    filename_to_fileid = {}
+    fileid_to_filename = {}
     all_subjects = eval(f'args.{split}_subjects') #train valid or test. 
     if subjects==None:
         subjects=all_subjects #for test and valid, always use all subjects
@@ -116,14 +121,53 @@ def read_data(args, subjects, split):
 
     else:
         raise Exception('args.data_split unknown')
-    for k, v in data.items():
+    for i, (k, v) in enumerate(data.items()):
+        if split=='test':
+            i+=100000
+        elif split=='valid':
+            i-=100000
+        filename_to_fileid[k[:-4]] = i
+        fileid_to_filename[i] = k[:-4]
         subject_id = "_".join(k.split("_")[:-1])
         sentence_id = int(k.split(".")[0][-2:])
         if subject_id in subjects.split() and sentence_id in splits[args.dataset][split]:
-            dataset_data.append(v)
-
+            # dataset_data.append(v)
+            dataset_data.append(v) #append only the fileid, and return the mapping as a dict (opacus cant handle strings in the collate fn)
     print(f'loaded data {split}: length {len(dataset_data)}')
-    return dataset_data, subjects_dict
+    return dataset_data, subjects_dict, fileid_to_filename, filename_to_fileid
+
+def pad_collate_fn(batch):
+    #allow for batches larger than 1
+    # batch is a list of tuples: 
+    # [(audio, vertice, template, one_hot, file_name), ..]
+    #get the max len
+    audio_max_len = max([len(x[0]) for x in batch])
+    vertice_max_len = max([len(x[1]) for x in batch])
+    padded_audios = []
+    padded_vertices = []
+    for i in batch:
+        #pad audio and vertice (just repeat pad final index)
+        audio = i[0]
+        audio_pad = audio_max_len-len(audio)
+        padded_audio = torch.nn.functional.pad(i[0], (0,audio_pad), 'constant', audio[-1]) #repeat final val
+        padded_audios.append(padded_audio)
+
+        #there must be a real function for this.. but this was the best i could do 
+        vertice = i[1]
+        padded_vertice = torch.zeros(vertice_max_len, vertice.shape[1])
+        padded_vertice[:len(vertice), :] = vertice
+        padded_vertice[len(vertice):, :] = vertice[-1]
+        padded_vertices.append(padded_vertice)
+    #return as list of tensors
+    padded_batch = (
+        torch.stack(padded_audios), 
+        torch.stack(padded_vertices), 
+        torch.stack([x[2] for x in batch]),
+        torch.stack([x[3] for x in batch]),
+        # [x[4] for x in batch], #these are strings
+        torch.stack([x[4] for x in batch]), #jp edit, made them IDs
+    )
+    return padded_batch
 
 def get_dataloaders(args, train_subjects_subset=None, splits=['train','valid','test']):
     if args.model.startswith('imitator'):
@@ -136,16 +180,23 @@ def get_dataloaders(args, train_subjects_subset=None, splits=['train','valid','t
         if train_subjects_subset==None:
             train_subjects_subset = args.train_subjects
     dataset = {}
+    fileid_to_filename = {}
     for split in splits:
         if split=='train':
             subjects = train_subjects_subset
+            batch_size=args.batch_size
         else:
             subjects = None
+            batch_size=1
+
         # subjects = train_subjects_subset #filters for test and valid also - desirable?
-        dataset_data, subjects_dict = read_data(args, subjects, split=split)
-        dataset_data = Dataset(dataset_data, subjects_dict, split, n_train_speakers)
+        dataset_data, subjects_dict, fid_to_fn, filename_to_fileid = read_data(args, subjects, split=split)
+        fileid_to_filename = fileid_to_filename | fid_to_fn 
+
+        dataset_data = Dataset(dataset_data, subjects_dict, filename_to_fileid, fid_to_fn, split, n_train_speakers)
         shuffle = False if split=='train' else False
-        dataset[split] = data.DataLoader(dataset=dataset_data, batch_size=1, shuffle=shuffle)
+        # dataset[split] = data.DataLoader(dataset=dataset_data, shuffle=shuffle)
+        dataset[split] = data.DataLoader(dataset=dataset_data, batch_size=batch_size, shuffle=shuffle, collate_fn=pad_collate_fn)
     return dataset
 
 

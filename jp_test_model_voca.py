@@ -10,6 +10,7 @@ torch.backends.cudnn.deterministic = True
 from timeit import default_timer as timer
 from imitator.utils.init_from_config import instantiate_from_config
 from argparse import ArgumentParser
+import matplotlib.pyplot as plt
 
 from main import count_parameters
 
@@ -28,9 +29,14 @@ class test_dataset_wise():
         self.args = args
 
         ### create the one-hot labels
-        one_hot_labels = np.eye(8)
-        self.one_hot_labels = torch.from_numpy(one_hot_labels).view(1, 8, 8).float()
-
+        if args.aggr=='avg':
+            one_hot_labels = np.zeros(len(args.all_train_subjects.split()))
+            self.one_hot_labels = torch.FloatTensor(one_hot_labels).unsqueeze(0).unsqueeze(-1)
+            # self.one_hot_labels = torch.FloatTensor(self.one_hot_labels)
+        else:
+            one_hot_labels = np.eye(len(args.all_train_subjects.split()))
+            self.one_hot_labels = torch.from_numpy(one_hot_labels).unsqueeze(0).float()
+        # self.one_hot_labels = torch.from_numpy(one_hot_labels).view(1, 8, 8).float()
         ### create the losses
         from imitator.utils.losses import Custom_errors
         from FLAMEModel.flame_masks import get_flame_mask
@@ -48,7 +54,7 @@ class test_dataset_wise():
             from imitator.utils.render_helper import render_helper
             self.rh = render_helper()
 
-    def run_loop_with_condition_test(self, dataloader, model, condition_id, eval_static_mesh=False):
+    def run_loop_with_condition_test(self, dataloader, model, condition_id, eval_static_mesh=False, tsne=None, aggr='avg'):
         # if len(model.nn_model.train_subjects) > 1:
         #     condition_subject = model.nn_model.train_subjects[condition_id]
         # else:
@@ -72,17 +78,28 @@ class test_dataset_wise():
             condition_id_list = [condition_id]
         print("Total sequence to run in the dataloader", len(dataloader))
         for batch in dataloader:
-            audio, vertice, template, one_hot_all, file_name = batch
-            print("file_name", file_name)
+            # breakpoint()
+            audio, vertice, template, one_hot_all, fileid = batch
+            file_name = dataloader.dataset.fileid_to_filename[int(fileid)]
             audio = audio.to(torch.device("cuda"))
             vertice = vertice.to(torch.device("cuda"))
             template = template.to(torch.device("cuda"))
             frmms, lrmms, lipmaxs = [], [], []
+            predictions = []
             for cid in condition_id_list:
+                cid = int(cid)
                 one_hot = self.one_hot_labels[:, cid, :].to(torch.device("cuda"))
                 if eval_static_mesh:
                     print('NOTICE: EVALUATING STATIC MESH')
                     prediction = template.repeat(1, vertice.shape[1], 1)
+                elif tsne is not None:
+                    if aggr=='avg':
+                        #1-d input layer?
+                        one_hot = torch.FloatTensor([[cid]]).to(torch.device('cuda'))
+                    # one_hot = one_hot_all
+                    prediction = model.return_hidden_state(audio, template, one_hot, layer_idx=tsne)
+                    predictions.append(prediction.detach().cpu())
+                    continue #dont do the rest of the loop
                 else:
                     prediction = model.predict(audio, template, one_hot)
                 pred_len = prediction.shape[1]
@@ -90,6 +107,9 @@ class test_dataset_wise():
                 frmms.append(self.custom_loss.error_in_mm(prediction, vertice).cpu().numpy())
                 lrmms.append(self.custom_loss.compute_masked_error_in_mm(prediction, vertice, self.lip_mask.to(torch.device('cuda'))).cpu().numpy())
                 lipmaxs.append(self.custom_loss.lip_max_l2(prediction, vertice, self.lip_mask.to(torch.device('cuda'))).item())
+            if tsne is not None:
+                results_dict_list.append({'predict': torch.stack(predictions), 'seq': file_name})
+                continue
             best_idx = np.argmin(lipmaxs) #choose best lipmax 
             frmm, lrmm, lipmax = frmms[best_idx], lrmms[best_idx], lipmaxs[best_idx]
             # reconstruction in mm
@@ -97,6 +117,9 @@ class test_dataset_wise():
             lip_reconstruction_mm.append(lrmm)
             # lip metrics
             lip_max_l2.append(lipmax)
+
+        if tsne:
+            return results_dict_list
 
         # simple metric rec loss
         out_dict = {
@@ -118,8 +141,83 @@ class test_dataset_wise():
         os.makedirs(out_dir, exist_ok=True)
 
         test_data = data
+        results_dict = self.run_loop_with_condition_test(test_data, model, condition,tsne=args.tsne, aggr=args.aggr)
 
-        results_dict = self.run_loop_with_condition_test(test_data, model, condition)
+        if args.tsne is not None:
+            spk_to_spkid = {
+                'FaceTalk_170728_03272': 0,
+                'FaceTalk_170904_00128': 1,
+                'FaceTalk_170725_00137': 2,
+                'FaceTalk_170915_00223': 3,
+                'FaceTalk_170811_03274': 4,
+                'FaceTalk_170913_03279': 5, 
+                'FaceTalk_170904_03276': 6, 
+                'FaceTalk_170912_03278': 7,
+                'FaceTalk_170809_00138': 8, 
+                'FaceTalk_170731_00024': 9
+                }
+            results_list = results_dict #not a dict if tsne
+            from sklearn.manifold import TSNE
+            all_data, test_ids, condition_ids = [], [], []
+            if args.condition_id==-1:
+                condition_idxs = range(len(train_subjects_list))
+            else:
+                condition_idxs = [int(args.condition_id)]
+            # condition_idxs = 
+            for condition_idx in condition_idxs:
+                for example in results_list:
+                    n_speakers, bsz, seq_len, hidden_dim = example['predict'].shape
+                    # condition_idx = condition_idx  # Select a speaker
+                    speaker_data = example['predict'][condition_idx].squeeze(0)  # This removes the batch size dimension
+                    speaker = '_'.join(example['seq'].split('_')[:-2])
+                    
+                    spkid = spk_to_spkid[speaker]
+                    test_ids.append(spkid)
+                    condition_ids.append(condition_idx)
+                    # setting_labels.append(f'spk_{spkid}_cond_{condition_idx}')
+                    speaker_data = np.asarray(speaker_data)
+                    average_data = np.mean(speaker_data, axis=0).reshape(1, -1) #might have to average bc seq_len is different
+                    all_data.append(average_data)
+            all_data = np.array(all_data).squeeze(1)
+            test_ids = np.array(test_ids)
+            condition_ids = np.array(condition_ids)
+            tsne = TSNE(perplexity=int(len(all_data)/2), n_components=2, random_state=42)  # n_components=2 for 2D plot
+
+            tsne_results = tsne.fit_transform(all_data)
+            color_map = plt.cm.get_cmap('tab10', 10)
+            markers = ['+','o','x','1','H','*','D','>', '<', '|']
+            for i in range(len(tsne_results)):
+                color = color_map(condition_ids[i])
+
+                marker = markers[test_ids[i]]
+                # marker = '+' if test_ids[i] == 0 else 'o'
+                plt.scatter(tsne_results[i, 0], tsne_results[i, 1], color=color, marker=marker, alpha=0.6)
+
+            # Create a custom legend for condition speakers
+            for i in range(len(set(condition_ids))):
+                plt.scatter([], [], color=color_map(i), label=f'Condition {i+1}')
+            for i in range(len(set(test_ids))):
+                # Add legend entries for test speakers
+                plt.scatter([], [], color='black', marker=markers[i], label=f'Test ID {i}')
+                # plt.scatter([], [], color='black', marker='o', label='Test ID 2')
+
+            plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+            plt.tight_layout()
+            plt.title('t-SNE of Model Representations')
+            plt.xlabel('t-SNE Dimension 1')
+            plt.ylabel('t-SNE Dimension 2')
+            # plt.show()
+
+            # print('done getting tsne')
+            # plt.figure(figsize=(12, 6))
+            # plt.subplot(1, 2, 2)
+            # scatter = plt.scatter(tsne_results[:, 0], tsne_results[:, 1], c=setting_ids, cmap=color_map, alpha=0.6)
+            # plt.colorbar(scatter, ticks=np.unique(setting_ids))
+            # plt.title('t-SNE of Averaged Data')
+            plt.savefig(f'{out_dir}/tsne.png')
+
+            # do tsne and return
+            return   
 
         ### process and dump the metrics
         metrics = process_result_dict(results_dict)
@@ -194,6 +292,15 @@ if __name__ == "__main__":
     parser.add_argument("--wav2vec_path", type=str, default="/home/paz/data/wav2vec2-base-960h", help='wav2vec path for the faceformer model')
     parser.add_argument("--data_split", type=str, default="vertical", help='vertical | horziontal - vertical=split on speakers, horzontal=split some of each train speaker for test and valid')
     parser.add_argument("--model", type=str, default='faceformer', help='which model to train, faceformer or imitator')
+    parser.add_argument("--batch_size", type=int, default=1, help='batch size (1 for test?)')
+
+    parser.add_argument("--tsne", type=int, nargs='?', default=None, help='save t_sne to model folder, wont run normal testing, int=layer idx')
+
+    parser.add_argument("--num_identity_classes", type=int, default=8, help='n speakers / size of initial layer')
+
+    parser.add_argument("--dp", type=str, default='none')
+
+    parser.add_argument("--test_on_ood", action='store_true', help='also test on the 2 OOD speakers (horizontal only)')
 
     args = parser.parse_args()
     from faceformer import Faceformer
@@ -251,18 +358,25 @@ if __name__ == "__main__":
     train_subjects_subset = train_subjects_list[args.train_idx]
     
     dataset = get_dataloaders(args, train_subjects_subset, splits=['test'])
-
-    #save the test outputs to result/ folder
     data = dataset['test']
-
+    if args.data_split=='horizontal' and args.test_on_ood==True:
+        #hacky: get two full test speakers as well
+        args.data_split='vertical'
+        args.test_subjects = "FaceTalk_170809_00138_TA FaceTalk_170731_00024_TA"
+        dataset = get_dataloaders(args, train_subjects_subset, splits=['test'])
+        test_data = dataset['test']
+        args.data_split='horizontal'
+        data.dataset.data.extend(test_data.dataset.data)
+        data.dataset.len = len(data.dataset.data)
+        data.dataset.filename_to_fileid = data.dataset.filename_to_fileid | test_data.dataset.filename_to_fileid
+        data.dataset.fileid_to_filename = data.dataset.fileid_to_filename | test_data.dataset.fileid_to_filename 
+        # print('WARNING: FILEID_TO_FILENAME PROBABLY BROKEN')
+        #Fixed by adding an offset of 100k to train and valid fileids 
+    
+    #save the test outputs to result/ folder
     tester = test_dataset_wise(args=args)
     logdir = os.path.dirname(args.model_path)
     tester.run_test(model, data, logdir, None, condition=int(args.condition_id))
-    # tester = test_dataset_wise(args=opt)
-    # print()
-
-    # tester.run_test(model, data, logdir,
-    #                           opt.data_to_eval, condition=int(data_cfg.conditiion_id))
 
     end = timer()
     print("\n\nTime to take to run the tesing suite in sec", end - start)

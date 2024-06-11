@@ -106,7 +106,7 @@ def calculate_epsilon(steps, sigma, sensitivity, delta):
     return (sensitivity / sigma) * np.sqrt(2 * np.log(1.25 / delta)) * np.sqrt(steps)
 
 
-def train(args, train_loader, model, optimizer, criterion, custom_loss, privacy_engine, epoch=100):
+def train(args, train_loader, model, optimizer, criterion, custom_loss, accountant, fileid_to_filename, epoch=100):
     iteration = 0
     epoch_losses = []
     for e in range(epoch):
@@ -117,7 +117,12 @@ def train(args, train_loader, model, optimizer, criterion, custom_loss, privacy_
         # pbar = tqdm(enumerate(train_loader),total=len(train_loader))
         # for i, (audio, vertice, template, one_hot, file_name) in pbar:
         print(f'training epoch{e}')
-        for i, (audio, vertice, template, one_hot, file_name) in enumerate(train_loader):
+        for audio, vertice, template, one_hot, fileid in train_loader:
+            if len(fileid)==0:
+                file_name = ''
+            else:
+                fileid = int(fileid[0][0]) #if batched just take the first speaker for conditioning?
+                file_name = fileid_to_filename[fileid]
             iteration += 1
             audio, vertice, template, one_hot  = audio.to(device="cuda"), vertice.to(device="cuda"), template.to(device="cuda"), one_hot.to(device="cuda")
             if args.model=='faceformer':
@@ -127,17 +132,52 @@ def train(args, train_loader, model, optimizer, criterion, custom_loss, privacy_
                 loss, vertice_out_w_style = model(audio, template,  vertice, one_hot, criterion,teacher_forcing=False)
             elif args.model.startswith('imitator_stg'):
                 #train speaker-specific model, use style loss
+                if type(file_name)==list:
+                    assert len(file_name)==1
+                    file_name = file_name[0]
                 rec_loss, pred_verts = model.style_forward(audio, file_name, template,  vertice, one_hot, criterion,teacher_forcing=False)
                 subjsen = file_name[0].split(".")[0]
                 mbp_loss = custom_loss.compute_mbp_reconstruction_loss(pred_verts, vertice, subjsen)
                 aux_loss = compute_auxillary_losses(pred_verts, vertice, custom_loss)
                 loss = rec_loss + aux_loss["aux_losses"] + mbp_loss
+                #rec_loss = L_mse
+                #aux_loss = velocity loss, weighted
+                #mpb_loss = lip closure (m, b, p = bilabial)
 
+            if loss.requires_grad==False:
+                continue #possibly causing an issue
             loss.backward()
             loss_log.append(loss.item())
+            
+            #testing to find which module is not updated in backward
+            if args.dp != 'none':
+                counter = 0
+                for pid, (name, p) in enumerate(model.named_parameters()):
+                    # print(name, pid, p.requires_grad, p.shape)
+                    if not p.requires_grad:
+                        # print('doesnt require grad')
+                        continue
+                    # breakpoint()
+                    p.grad_sample = p.grad.unsqueeze(0)
+                    # SETTING GRAD SAMPLE TO GRAD BECAUSE bsz = 1
 
+                    # per_sample_grad = p.grad_sample
+                    # counter += 1
+                    # if per_sample_grad is None:
+                    #     print(f'got none grad')
+                    #     if (p.grad.sum()==0).item()==True:
+                    #         p.grad_sample = p.grad.unsqueeze(0).repeat(vertice.shape[0], 1, 1)
+                    #         # p.grad_sample = p.grad.unsqueeze(0).repeat(69, 1, 1)
+                    #         print('new grad shape', p.grad_sample.shape)
+                    # else:
+                    #     print('grad shape', p.grad_sample.shape)
+                    # breakpoint()
+                # grad_samples = [x.grad_sample for x in model.parameters() if x.requires_grad]
+    
             if args.dp=='opacus':
-                epsilon = privacy_engine.accountant.get_epsilon(delta=args.delta)
+                optimizer.step()
+                optimizer.zero_grad()
+                epsilon = accountant.get_epsilon(delta=args.delta)
                 print(f"(ε = {epsilon:.2f}, δ = {args.delta})")
             elif args.dp=='basic':
                 accumulated_grads = [[] for _ in model.parameters()]  # List of lists for each parameter
@@ -157,20 +197,23 @@ def train(args, train_loader, model, optimizer, criterion, custom_loss, privacy_
                 delta = 1e-3  # Acceptable failure probability of the privacy guarantee
                 epsilon = calculate_epsilon(iteration, sigma, sensitivity, delta)
                 print(f"Approximate ε after {iteration} steps: {epsilon}")
-
-            if i % args.gradient_accumulation_steps==0:
-                optimizer.step()
-                optimizer.zero_grad()
+            
+            if not args.dp=='opacus':
+                if iteration % args.gradient_accumulation_steps==0:
+                    optimizer.step()
+                    optimizer.zero_grad()
 
         epoch_loss = np.mean(loss_log)
         epoch_losses.append(epoch_loss)
     return epoch_losses
 
-def eval(args, dev_loader, model, criterion, custom_loss):
+def eval(args, dev_loader, model, criterion, custom_loss, fileid_to_filename):
     valid_loss_log = []
     model.eval()
     train_subjects_list = [i for i in args.all_train_subjects.split(" ")]
-    for audio, vertice, template, one_hot_all,file_name in dev_loader:
+    for audio, vertice, template, one_hot_all,fileid in dev_loader:
+        fileid = int(fileid)
+        file_name = fileid_to_filename[fileid]
         # to gpu
         audio, vertice, template, one_hot_all= audio.to(device="cuda"), vertice.to(device="cuda"), template.to(device="cuda"), one_hot_all.to(device="cuda")
         train_subject = "_".join(file_name[0].split("_")[:-1])
@@ -192,6 +235,9 @@ def eval(args, dev_loader, model, criterion, custom_loss):
                 loss, vertice_out_w_style = model(audio, template,  vertice, one_hot, criterion,teacher_forcing=False)
             elif args.model.startswith('imitator_stg'):
                 #train speaker-specific model, use style loss
+                if type(file_name)==list:
+                    assert len(file_name)==1
+                    file_name = file_name[0]
                 rec_loss, pred_verts = model.style_forward(audio, file_name, template,  vertice, one_hot, criterion,teacher_forcing=False)
                 subjsen = file_name[0].split(".")[0]
                 mbp_loss = custom_loss.compute_mbp_reconstruction_loss(pred_verts, vertice, subjsen)
@@ -203,7 +249,7 @@ def eval(args, dev_loader, model, criterion, custom_loss):
     return current_loss
 
 @torch.no_grad()
-def test(args, model, test_loader):
+def test(args, model, test_loader, fileid_to_filename):
     # save_path = os.path.join(args.dataset,args.save_path)
     train_subjects_list = [i for i in args.all_train_subjects.split(" ")]
 
@@ -211,8 +257,10 @@ def test(args, model, test_loader):
     # model = model.to(torch.device("cuda"))
     model.eval()
     results = []
-    for audio, vertice, template, one_hot_all, file_name in test_loader:
+    for audio, vertice, template, one_hot_all, fileid in test_loader:
         # to gpu
+        fileid = int(fileid[0]) #just take the first speaker for conditioning?
+        file_name = fileid_to_filename[fileid]
         audio, vertice, template, one_hot_all= audio.to(device="cuda"), vertice.to(device="cuda"), template.to(device="cuda"), one_hot_all.to(device="cuda")
         train_subject = "_".join(file_name[0].split("_")[:-1])
         if train_subject in train_subjects_list:
@@ -227,7 +275,7 @@ def test(args, model, test_loader):
         for iter in train_subject_ids:
             condition_subject = train_subjects_list[iter]
             one_hot = one_hot_all[:,iter,:]
-            prediction = model.predict(audio, template, one_hot)
+            prediction = model(audio, template, vertice=None, one_hot=one_hot, criterion=None, test_dataset=test_loader)
             prediction = prediction.squeeze() # (seq_len, V*3)
             vertice = vertice.squeeze()
             result = lip_max_l2(args.vertice_dim, prediction, vertice)
@@ -342,6 +390,11 @@ if __name__=='__main__':
     parser.add_argument("--model", type=str, default='faceformer', help='which model to train, faceformer, imitator_gen, imitator_stg01, imitator_stg02')
     parser.add_argument("--base_model_path", type=str, default='', help='path to previous round of training (for imitator_stg01 and 02')
 
+    parser.add_argument("--batch_size", type=int, default=1, help='batch size')
+
+    parser.add_argument("--delta", type=float, default=1e-5, help='dp delta')
+    parser.add_argument("--noise_multiplier", type=float, default=1.0, help='dp noise_multiplier')
+    parser.add_argument("--max_grad_norm", type=float, default=1.0, help='dp max grad norm')
     args = parser.parse_args()
 
     if args.train_idx != -1:
@@ -355,7 +408,8 @@ if __name__=='__main__':
         args.valid_subjects=args.train_subjects
         args.test_subjects=args.train_subjects
 
-    out_dir = f'{args.dir}/{args.dataset}/{args.save_path}/clients_{args.num_clients}_e_{args.max_epoch}_aggr_{args.aggr}_data_split_{args.data_split}_dp_{args.dp}_train_idx_{args.train_idx}_model_{args.model}'
+    
+    out_dir = f'{args.dir}/{args.dataset}/{args.save_path}/c_{args.num_clients}_e_{args.max_epoch}_aggr_{args.aggr}_ds_{args.data_split}_dp_{args.dp}_delta{args.delta}_nm_{args.noise_multiplier}_gn_{args.max_grad_norm}_tidx_{args.train_idx}_model_{args.model}'
     os.makedirs(out_dir, exist_ok=True)
 
     train_subjects_list = [i for i in args.train_subjects.split(" ")]
@@ -364,7 +418,12 @@ if __name__=='__main__':
     from data_loader import get_dataloaders
 
     if args.dp=='opacus':
-        from imitator.models.opacus_nn_model_jp import imitator
+        # from imitator.models.opacus_nn_model_jp import imitator
+        print('warning, importing default model with opacus flag!')
+        from imitator.models.nn_model_jp import imitator
+        # print('warning importing opacus 2 model')
+        # from imitator.models.opacus_nn_model_jp_2 import imitator
+
     else:
         from imitator.models.nn_model_jp import imitator
     # from imitator.models.nn_model_jp import imitator
@@ -391,7 +450,7 @@ if __name__=='__main__':
     # testloader = DataLoader(dataset=test_data, batch_size=1, shuffle=False)
 
     class FlowerClient(fl.client.NumPyClient):
-        def __init__(self, net, trainloader, valloader, optimizer, criterion, privacy_engine, cid):
+        def __init__(self, net, trainloader, valloader, optimizer, criterion, accountant, fileid_to_filename, cid):
             loss_cfg = {'full_rec_loss': 1.0, 'velocity_weight': 10.0}
             self.net = net
             self.trainloader = trainloader
@@ -399,10 +458,11 @@ if __name__=='__main__':
             self.optimizer = optimizer
             self.criterion = criterion
             self.cid = cid
-            self.privacy_engine = privacy_engine
+            self.accountant = accountant
             self.train_metrics_path = f'{out_dir}/client_{cid}_train_results.csv'
             self.valid_metrics_path = f'{out_dir}/client_{cid}_valid_results.csv'
             self.custom_loss = Custom_errors(args.vertice_dim, loss_creterion=self.criterion, loss_dict=loss_cfg)
+            self.fileid_to_filename = fileid_to_filename
 
         def get_parameters(self, config):
             return [val.cpu().numpy() for _, val in self.net.state_dict().items()]
@@ -410,18 +470,21 @@ if __name__=='__main__':
         def fit(self, parameters, config):
             print(f"training client {self.cid}")
             set_parameters(self.net, parameters)
-            epoch_losses = train(args, self.trainloader, self.net, self.optimizer, self.criterion, self.custom_loss, self.privacy_engine, epoch=args.max_epoch)
+            epoch_losses = train(args, self.trainloader, self.net, self.optimizer, self.criterion, self.custom_loss, self.accountant, self.fileid_to_filename, epoch=args.max_epoch)
             # evaluate after train epochs concluded
             metrics_dict = {'loss': epoch_losses}
             add_to_csv(self.train_metrics_path, metrics_dict)
 
             print(f"evaluating client {self.cid}")
-            loss = eval(args, self.valloader, self.net, self.criterion, self.custom_loss)
-
-            accuracy = test(args, self.net, self.valloader)
+            loss = eval(args, self.valloader, self.net, self.criterion, self.custom_loss, self.fileid_to_filename)
+            # self.net = self.net.to_standard_module()
+            accuracy = test(args, self.net, self.valloader, self.fileid_to_filename)
             # loss = eval(args, VALLOADER, self.net, self.criterion)
             # accuracy = test(args, self.net, VALLOADER)
             metrics_dict = {'loss': [loss], 'accuracy': [float(accuracy)]}
+            if args.dp=='opacus':
+                epsilon = self.accountant.get_epsilon(delta=args.delta)
+                metrics_dict['epsilon'] = epsilon
             add_to_csv(self.valid_metrics_path, metrics_dict)
             return self.get_parameters(config={}), len(self.trainloader), {}
 
@@ -488,36 +551,66 @@ if __name__=='__main__':
         assert torch.cuda.is_available()
         model = model.to(torch.device("cuda"))
         criterion = nn.MSELoss()
-        if args.dp=='opacus':
-            #do NOT filter untrainable params bc it breaks opacus. Opacus SHOULD ignore these.
-            optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-        else:
-            optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad,model.parameters()), lr=args.lr)
+        # if args.dp=='opacus':
+        #     #do NOT filter untrainable params bc it breaks opacus. Opacus SHOULD ignore these.
+        #     # optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+        #     optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad,model.parameters()), lr=args.lr)
+        #     # for pid, p in enumerate(model.parameters()):
+        #     #     try:
+        #     #         print(pid, p.requires_grad)
+        #     #     except Exception as e:
+        #     #         print(e)
+        #     #         continue
+        #     # breakpoint()
+        # else:
+        optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad,model.parameters()), lr=args.lr)
 
         # dataset = get_dataloaders(args, return_test=False)
 
-        dataset = get_dataloaders(args, train_subjects_subset, splits=['train','valid'])
+        dataset, fileid_to_filename = get_dataloaders(args, train_subjects_subset, splits=['train','valid'])
         
         trainloader = dataset['train']
         valloader = dataset['valid']
         
-        privacy_engine = None
+        accountant = None
         if args.dp=='opacus':
-            # for i, j in zip(list(model.parameters()), sum(
-            #             [param_group["params"] for param_group in optimizer.param_groups],[],)):
-            #     if not i.shape==j.shape:
-            #         breakpoint()
-            privacy_engine = PrivacyEngine(secure_mode=False) #make secure for final training!
-            model, optimizer, trainloader = privacy_engine.make_private(
-                module=model,
+            # OPTION 1: Fully wrap the model etc in the standard way 
+            # from opacus.grad_sample import GradSampleModule, GradSampleModuleExpandedWeights
+            # from opacus import PrivacyEngine
+            # # from register_grad_samplers import compute_td_grad_sample
+            # privacy_engine = PrivacyEngine(secure_mode=False) #make secure for final training!
+            # model = GradSampleModule(model)
+            # model, optimizer, trainloader = privacy_engine.make_private(
+            #     module=model,
+            #     optimizer=optimizer,
+            #     data_loader=trainloader,
+            #     noise_multiplier=1.0,
+            #     max_grad_norm=1.0,
+            #     poisson_sampling=False
+            #     # grad_sample_mode="ew"
+            #     # grad_sample_mode="functorch"
+            # )
+            # accountant = privacy_engine.accountant
+
+            # OPTION 2: Just wrap the optimizer
+            # see: https://opacus.ai/tutorials/intro_to_advanced_features
+            from opacus.optimizers import DPOptimizer
+            sample_rate = 1 / len(trainloader)
+            expected_batch_size = int(len(trainloader.dataset) * sample_rate)
+            expected_batch_size = 1
+            optimizer = DPOptimizer(
                 optimizer=optimizer,
-                data_loader=trainloader,
-                noise_multiplier=1.0,
-                max_grad_norm=1.0,
+                noise_multiplier=args.noise_multiplier,
+                max_grad_norm=args.max_grad_norm,
+                expected_batch_size=expected_batch_size,
             )
+            from opacus.accountants import RDPAccountant
+            accountant = RDPAccountant()
+            optimizer.attach_step_hook(accountant.get_optimizer_hook_fn(sample_rate=sample_rate))
+
 
         # Create a  single Flower client representing a single organization
-        client = FlowerClient(model, trainloader, valloader, optimizer, criterion, privacy_engine, cid).to_client()
+        client = FlowerClient(model, trainloader, valloader, optimizer, criterion, accountant, fileid_to_filename, cid).to_client()
 
         #eval intitial parameters - really janky implementation just for debugging
         # npclient = client.numpy_client
@@ -563,7 +656,7 @@ if __name__=='__main__':
         set_parameters(model, parameters)  # Update model with the latest parameters
         
         # dataset = get_dataloaders(args, return_test=False) #load every time for memory
-        dataset = get_dataloaders(args, train_subjects_subset=None, splits=['valid'])
+        dataset, fileid_to_filename = get_dataloaders(args, train_subjects_subset=None, splits=['valid'])
         valloader = dataset['valid']
 
         # valloader = VALLOADER #use global valloader
@@ -572,8 +665,8 @@ if __name__=='__main__':
         loss_cfg = {'full_rec_loss': 1.0, 'velocity_weight': 10.0}        
         custom_loss = Custom_errors(args.vertice_dim, loss_creterion=criterion, loss_dict=loss_cfg)
 
-        loss = eval(args, valloader, model, criterion, custom_loss)
-        accuracy = test(args, model, valloader)
+        loss = eval(args, valloader, model, criterion, custom_loss, fileid_to_filename)
+        accuracy = test(args, model, valloader, fileid_to_filename)
         
         print(f'saving aggregated metrics')
         metrics_dict = {'loss': [loss], 'accuracy': [float(accuracy)]}
@@ -659,8 +752,6 @@ if __name__=='__main__':
         #the adaptive one seems to start with much nicer defaults..!
         strategy = fl.server.strategy.DPFedAvgAdaptive(strategy, noise_multiplier=1.0, num_sampled_clients=args.num_clients, server_side_noising=True) 
         # strategy = fl.server.strategy.DifferentialPrivacyServerSideFixedClipping(strategy, noise_multiplier=1.0, clipping_norm=0.1, num_sampled_clients=args.num_clients)
-    elif args.dp=='opacus':
-        from opacus import PrivacyEngine
 
         
     if args.num_clients==1:

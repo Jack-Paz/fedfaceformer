@@ -115,7 +115,6 @@ class motion_decoder(nn.Module):
         self.style_concat = style_concat
         if style_concat:
             in_channels = 2 * in_channels
-
         if num_dec_layers == 1:
             self.decoder = nn.Sequential()
             final_out_layer = GradSampleModule(nn.Linear(in_channels, out_channels))
@@ -141,7 +140,7 @@ class motion_decoder(nn.Module):
             decoder = nn.Sequential(*dec_layers)
             self.decoder = nn.Sequential(*decoder)
 
-            final_out_layer = nn.Linear(ch, out_channels)
+            final_out_layer = GradSampleModule(nn.Linear(ch, out_channels))
             self.decoder.add_module("final_out_layer", final_out_layer)
 
 
@@ -169,14 +168,18 @@ class motion_decoder(nn.Module):
 
         return self.decoder(vertice_out_w_style)
 
+def swap_dims(x):
+    #swap first and second dims for batch_first
+    return x.reshape(x.shape[1], x.shape[0], x.shape[2])
+
 class OpacusDecoderLayer(nn.Module):
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation=nn.functional.relu, layer_norm_eps=1e-5, batch_first=False, norm_first=False, bias=True, device=None, dtype=None):
-        # decoder_layer = nn.TransformerDecoderLayer(d_model=args.feature_dim, nhead=4, dim_feedforward=2*args.feature_dim, batch_first=True)
-        # args.feature_dim = 64 
+
         factory_kwargs = {'device': device, 'dtype': dtype}
         super().__init__()
-        self.self_attn = GradSampleModule(DPMultiheadAttention(d_model, nhead, dropout=dropout, bias=bias))
-        self.multihead_attn = GradSampleModule(DPMultiheadAttention(d_model, nhead, dropout=dropout, bias=bias))
+        self.batch_first = batch_first
+        self.self_attn = DPMultiheadAttention(d_model, nhead, dropout=dropout, bias=bias, batch_first=self.batch_first)
+        self.multihead_attn = DPMultiheadAttention(d_model, nhead, dropout=dropout, bias=bias, batch_first=self.batch_first)
         # Implementation of Feedforward model
         self.linear1 = GradSampleModule(nn.Linear(d_model, dim_feedforward, bias=bias, **factory_kwargs))
         self.dropout = nn.Dropout(dropout)
@@ -220,26 +223,36 @@ class OpacusDecoderLayer(nn.Module):
     # self-attention block
     def _sa_block(self, x,
                 attn_mask, key_padding_mask, is_causal: bool = False):
-        x = self.self_attn(x, x, x,
-                        attn_mask=attn_mask,
-                        key_padding_mask=key_padding_mask,
-                        is_causal=is_causal,
-                        need_weights=False)[0]
-        return self.dropout1(x)
+        # x = self.self_attn(x, x, x,
+        #                 attn_mask=attn_mask,
+        #                 key_padding_mask=key_padding_mask,
+        #                 is_causal=is_causal,
+        #                 need_weights=False)[0]
+        # attn_mask = swap_dims(attn_mask) #does it need to be swapped?
+        x = self.self_attn(x, x, x, attn_mask=attn_mask, key_padding_mask=key_padding_mask, need_weights=False)[0]
+        # x = self.dropout1(x)
+        return x
 
     # multihead attention block
     def _mha_block(self, x, mem,
                 attn_mask, key_padding_mask, is_causal: bool = False):
-        x = self.multihead_attn(x, mem, mem,
-                                attn_mask=attn_mask,
-                                key_padding_mask=key_padding_mask,
-                                is_causal=is_causal,
-                                need_weights=False)[0]
+        # x = self.multihead_attn(x, mem, mem,
+        #                         attn_mask=attn_mask,
+        #                         key_padding_mask=key_padding_mask,
+        #                         is_causal=is_causal,
+        #                         need_weights=False)[0]
+        # attn_mask = swap_dims(attn_mask)
+        # mem = swap_dims(mem)
+        x = self.multihead_attn(x, mem, mem, attn_mask=attn_mask, key_padding_mask=key_padding_mask,need_weights=False)[0]
         return self.dropout2(x)
 
     # feed forward block
     def _ff_block(self, x):
+        # if self.batch_first:
+        #     x = swap_dims(x)
         x = self.linear2(self.dropout(self.activation(self.linear1(x))))
+        # if self.batch_first:
+        #     x = swap_dims(x)
         return self.dropout3(x)
 
 
@@ -275,6 +288,7 @@ class imitator(nn.Module):
         # print('BREAKING THE CODE JUST TO TEST, DELET')
         # self.audio_encoder = GradSampleModule(nn.Linear(16000, args.feature_dim))
         if args.dp=='opacus':
+            print('WARNING: FREEZING WAV2VEC')
             for param in self.audio_encoder.parameters():
                 param.requires_grad = False #freeze wav2vec
         
@@ -287,11 +301,11 @@ class imitator(nn.Module):
             self.audio_encoder.generate_static_audio_features = args.wav2vec_static_features # default value is false
 
         self.PPE = PositionalEncoding(args.feature_dim, max_len=args.max_seq_len)
-        self.causal_mh_mask = casual_mask(n_head=4, max_seq_len=args.max_seq_len, period=args.max_seq_len)
-
-        decoder_layer = GradSampleModule(OpacusDecoderLayer(d_model=args.feature_dim, nhead=4, dim_feedforward=2*args.feature_dim, batch_first=True))
+        self.causal_mh_mask = casual_mask(n_head=32, max_seq_len=args.max_seq_len, period=args.max_seq_len)
+        # this thing needs bsz * 4 heads, but batches are random sized, just make it 32 and hope bsz never greater than 8??
+        decoder_layer = OpacusDecoderLayer(d_model=args.feature_dim, nhead=4, dim_feedforward=2*args.feature_dim, batch_first=True)
         
-        self.transformer_decoder = GradSampleModule(nn.TransformerDecoder(decoder_layer, num_layers=1))
+        self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=1)
         
         # style embedding
         self.obj_vector = GradSampleModule(nn.Linear(args.num_identity_classes, args.feature_dim, bias=False))
@@ -302,10 +316,11 @@ class imitator(nn.Module):
                                             num_dec_layers=args.num_dec_layers, fixed_channel=args.fixed_channel,
                                             style_concat=args.style_concat)
 
-    def forward(self, audio, template, vertice, one_hot, criterion, teacher_forcing=True):
-    
+    def forward(self, audio, template, vertice, one_hot, criterion, teacher_forcing=True, test_dataset=None):
+        
         self.device = audio.device
-    
+        if len(audio)==0:
+            return torch.FloatTensor(0), [0] #happens during opacus training bc of random batches
         # tgt_mask: :math:`(T, T)`.
         # memory_mask: :math:`(T, S)`.
         template = template.unsqueeze(1)  # (1,1, V*3)
@@ -325,7 +340,7 @@ class imitator(nn.Module):
                 vertice_input = self.PPE(vertice_emb)
     
             # get the masks
-            tgt_mask = self.causal_mh_mask[:, :vertice_input.shape[1], :vertice_input.shape[1]].clone().detach().to(device=self.device)
+            tgt_mask = self.causal_mh_mask[:audio.shape[0]*4, :vertice_input.shape[1], :vertice_input.shape[1]].clone().detach().to(device=self.device) # JP added the bsz computation 
             memory_mask = enc_dec_mask(self.device, self.dataset, vertice_input.shape[1], hidden_states.shape[1])
             gen_viseme_feat = self.transformer_decoder(vertice_input, hidden_states, tgt_mask=tgt_mask, memory_mask=memory_mask)
             new_output = gen_viseme_feat[:,-1,:].unsqueeze(1)
@@ -369,14 +384,11 @@ class imitator(nn.Module):
                     vertice_input = self.PPE(vertice_emb)
 
                 ## get the masks
-                tgt_mask = self.causal_mh_mask[:, :vertice_input.shape[1], :vertice_input.shape[1]]
+                tgt_mask = self.causal_mh_mask[:audio.shape[0]*4, :vertice_input.shape[1], :vertice_input.shape[1]].clone().detach().to(device=self.device) # JP added the bsz computation 
                 tgt_mask = tgt_mask.clone().detach().to(device=self.device)
                 memory_mask = enc_dec_mask(self.device, self.dataset, vertice_input.shape[1], hidden_states.shape[1])
                 ## transformer decoder
-                gen_viseme_feat = self.transformer_decoder(vertice_input,
-                                                                hidden_states,
-                                                                tgt_mask=tgt_mask,
-                                                                memory_mask=memory_mask)
+                gen_viseme_feat = self.transformer_decoder(vertice_input,hidden_states,tgt_mask=tgt_mask,memory_mask=memory_mask)
                 new_output = gen_viseme_feat[:, -1, :].unsqueeze(1)
                 vertice_emb = torch.cat((vertice_emb, new_output), 1)
 
@@ -417,7 +429,7 @@ class imitator(nn.Module):
                 vertice_input = self.PPE(vertice_emb)
 
             # get the masks
-            tgt_mask = self.causal_mh_mask[:, :vertice_input.shape[1], :vertice_input.shape[1]].clone().detach().to(device=self.device)
+            tgt_mask = self.causal_mh_mask[:audio.shape[0]*4, :vertice_input.shape[1], :vertice_input.shape[1]].clone().detach().to(device=self.device) # JP added the bsz computation 
             memory_mask = enc_dec_mask(self.device, test_dataset, vertice_input.shape[1], hidden_states.shape[1])
             # run the decoder
             gen_viseme_feat = self.transformer_decoder(vertice_input, hidden_states, tgt_mask=tgt_mask, memory_mask=memory_mask)

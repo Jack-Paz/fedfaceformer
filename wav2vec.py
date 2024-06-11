@@ -102,7 +102,7 @@ class Wav2Vec2Model(Wav2Vec2Model):
             hidden_states = linear_interpolation(hidden_states, 50, 30,output_len=frame_num)
      
         if attention_mask is not None:
-            output_lengths = self._get_feat_extract_output_lengths(attention_mask.sum(-1))
+            odutput_lengths = self._get_feat_extract_output_lengths(attention_mask.sum(-1))
             attention_mask = torch.zeros(
                 hidden_states.shape[:2], dtype=hidden_states.dtype, device=hidden_states.device
             )
@@ -112,7 +112,9 @@ class Wav2Vec2Model(Wav2Vec2Model):
             attention_mask = attention_mask.flip([-1]).cumsum(-1).flip([-1]).bool()
 
         hidden_states = self.feature_projection(hidden_states)
-
+        if type(hidden_states)==tuple:
+            #later versions of pytorch seem to return (dropout_result, layernorm_result)
+            hidden_states = hidden_states[0]
         if self.config.apply_spec_augment and self.training:
             batch_size, sequence_length, hidden_size = hidden_states.size()
             if self.config.mask_time_prob > 0:

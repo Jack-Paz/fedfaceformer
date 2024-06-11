@@ -169,3 +169,47 @@ class Faceformer(nn.Module):
 
         vertice_out = vertice_out + template
         return vertice_out
+
+    def return_hidden_state(self, audio, template, one_hot, layer_idx=-1, test_dataset=None):
+        layer_idxs = [0,1,2,3]
+        lid = layer_idxs[layer_idx] #to allow -1 indexing
+
+        template = template.unsqueeze(1) # (1,1, V*3)
+        obj_embedding = self.obj_vector(one_hot)
+        hidden_states = self.audio_encoder(audio, self.dataset).last_hidden_state
+        if self.dataset == "BIWI":
+            frame_num = hidden_states.shape[1]//2
+        # elif self.dataset == "vocaset":
+        #     frame_num = hidden_states.shape[1]
+        else:
+            frame_num = hidden_states.shape[1]            
+        hidden_states = self.audio_feature_map(hidden_states)
+        if lid==0: 
+            return hidden_states
+        for i in range(frame_num):
+            if i==0:
+                vertice_emb = obj_embedding.unsqueeze(1) # (1,1,feature_dim)
+                style_emb = vertice_emb
+                vertice_input = self.PPE(style_emb)
+            else:
+                vertice_input = self.PPE(vertice_emb)
+
+            tgt_mask = self.biased_mask[:, :vertice_input.shape[1], :vertice_input.shape[1]].clone().detach().to(device=self.device)
+            memory_mask = enc_dec_mask(self.device, self.dataset, vertice_input.shape[1], hidden_states.shape[1])
+            vertice_out = self.transformer_decoder(vertice_input, hidden_states, tgt_mask=tgt_mask, memory_mask=memory_mask)
+            # vertice_map_r is a linear layer, takes only one argument, happens during loop
+            vertice_out = self.vertice_map_r(vertice_out)
+
+            new_output = self.vertice_map(vertice_out[:,-1,:]).unsqueeze(1)
+            # adding style happens inside loop, so possibly vertivce_out will have style embeddings
+            new_output = new_output + style_emb
+            vertice_emb = torch.cat((vertice_emb, new_output), 1)
+        if lid==1:
+            return vertice_out
+        if lid==2:
+            return new_output
+
+        vertice_out = vertice_out + template
+        if lid==3:
+            return vertice_out
+        return vertice_out

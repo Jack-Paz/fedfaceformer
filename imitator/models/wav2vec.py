@@ -88,7 +88,6 @@ class Wav2Vec2Model(Wav2Vec2Model):
         # added for the testing to produce stable features
         if self.generate_static_audio_features:
             self.eval()
-
         self.config.output_attentions = True
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -122,12 +121,15 @@ class Wav2Vec2Model(Wav2Vec2Model):
 
         # feature extarcts return - hidden_states, norm_hidden_states
         # hidden_states is the projected feature
-        # import pdb; pdb.set_trace()z
         # This is added to reduce the jitters for the sequence
         # self.feature_projection.eval()
+        # hidden_states = self.feature_projection(hidden_states)
+        #removed [0]
         hidden_states = self.feature_projection(hidden_states)[0]
+            
         # print("hidden states", hidden_states[0, 0, :5])
-
+        if len(hidden_states.shape)==2:
+            hidden_states = hidden_states.unsqueeze(0)
         if self.config.apply_spec_augment and self.training:
             batch_size, sequence_length, hidden_size = hidden_states.size()
             if self.config.mask_time_prob > 0:
@@ -155,7 +157,6 @@ class Wav2Vec2Model(Wav2Vec2Model):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-
         hidden_states = encoder_outputs[0]
         if not return_dict:
             return (hidden_states,) + encoder_outputs[1:]
