@@ -107,14 +107,12 @@ def read_data(args, subjects, split):
         # test_idx = vocaset_idx[n_valid:n_test]
         # splits = {'vocaset':{'train':train_idx,'valid':valid_idx,'test':test_idx}, 'BIWI':{'train':range(1,33),'valid':range(33,37),'test':range(37,41)}}
         splits = {'vocaset':{'train':range(1,25),'valid':range(25,33),'test':range(33,41)}, 'BIWI':{'train':range(1,33),'valid':range(33,37),'test':range(37,41)}, 'hdtf':{'train':range(1,8),'valid':range(8,10),'test':range(10,13)}}
-
     elif args.data_split=='vertical':
         if args.dataset=='vocaset':
             # print('WARNING: DEFAULT SPLIT ONLY USES HALF THE TEST AND VALID SETS!') #used to be (21,41) - fixed
             splits = {'vocaset':{'train':range(1,41),'valid':range(1,41),'test':range(1,41)}, 
                   'BIWI':{'train':range(1,33),'valid':range(33,37),'test':range(37,41)}, 
                   'hdtf': {'train':range(1,13),'valid':range(1,13),'test':range(1,13)}}
-
     elif args.data_split=='stg':
         #imitator style adaptation, just take a few utts (taken from config)
         splits = {'vocaset':{'train':range(1,5),'valid':range(19,21),'test':range(21,41)}}

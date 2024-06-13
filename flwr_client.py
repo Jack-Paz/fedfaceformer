@@ -380,7 +380,6 @@ if __name__=='__main__':
     parser.add_argument("--num_cpus", type=int, default=1)
     parser.add_argument("--num_gpus", type=float, default=1)
 
-
     parser.add_argument("--wav2vec_path", type=str, default="/home/paz/data/wav2vec2-base-960h", help='wav2vec path for the faceformer model')
     parser.add_argument("--aggr", type=str, default="avg", help='avg | mask - which aggregation method to use')
     parser.add_argument("--dp", type=str, default="none", help='none | fixed | adaptive | opacus | basic - which differential privacy method to use')
