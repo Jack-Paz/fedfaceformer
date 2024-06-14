@@ -28,10 +28,10 @@ for wav in wavs:
     if speaker in spk_to_wav:
         spk_to_wav[speaker][wav] = duration
     else:
-        spk_to_wav[speaker] = {wav: duration} 
+        spk_to_wav[speaker] = {'name': wav, 'dur': duration, } 
 
-wniv = set([x.split('.')[0] for x in verts]) - set([x.split('.')[0] for x in wavs])
-vniw = set([x.split('.')[0] for x in wavs]) - set([x.split('.')[0] for x in verts])
+wniv = set([x.split('.')[0] for x in wavs]) - set([x.split('.')[0] for x in verts])
+vniw = set([x.split('.')[0] for x in verts]) - set([x.split('.')[0] for x in wavs])
 print('wavs not in verts', wniv)
 print('verts not in wavs', vniw)
 

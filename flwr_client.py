@@ -399,6 +399,11 @@ if __name__=='__main__':
     if args.train_idx != -1:
         args.train_subjects = args.train_subjects.split(" ")[args.train_idx]
 
+    if args.dataset=='hdtf':
+        from hdtf_subjects import train_subjects, valid_subjects, test_subjects
+        args.train_subjects = train_subjects
+        args.valid_subjects = valid_subjects
+        args.test_subjects = test_subjects
 
     if args.data_split=='horizontal':
         print('HORIZONTAL DATA SPLIT, setting vaild and test subjects to train subjects')

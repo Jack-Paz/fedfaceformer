@@ -73,26 +73,50 @@ def read_data(args, subjects, split):
             subject = '_'.join(f.split('_')[:-1])
             if subject not in subjects.split():
                 continue
-            if f.endswith("wav"):
-                wav_path = os.path.join(r,f)
-                speech_array, sampling_rate = librosa.load(wav_path, sr=16000)
-                input_values = np.squeeze(processor(speech_array,sampling_rate=16000).input_values)
-                key = f.replace("wav", "npy")
-                data[key]["audio"] = input_values
-                subject_id = "_".join(key.split("_")[:-1])
-                temp = templates[subject_id]
-                data[key]["name"] = f
-                data[key]["template"] = temp.reshape((-1)) 
-                vertice_path = os.path.join(vertices_path,f.replace("wav", "npy"))
-                if not os.path.exists(vertice_path):
-                    del data[key]
-                else:
-                    if args.dataset == "vocaset":
-                        data[key]["vertice"] = np.load(vertice_path,allow_pickle=True)[::2,:]#due to the memory limit
-                    elif args.dataset == "hdtf":
-                        data[key]["vertice"] = np.load(vertice_path,allow_pickle=True)[::2,:].reshape(-1, int(args.vertice_dim))
-                    elif args.dataset == "BIWI":
-                        data[key]["vertice"] = np.load(vertice_path,allow_pickle=True)
+            if not f.endswith("wav"):
+                continue
+            vertice_path = os.path.join(vertices_path,f.replace("wav", "npy"))
+            if not os.path.exists(vertice_path):
+                print(f'warning, vertice not found for wav: {f}, skipping')
+                continue
+            wav_path = os.path.join(r,f)
+            speech_array, sampling_rate = librosa.load(wav_path, sr=16000)
+            input_values = np.squeeze(processor(speech_array,sampling_rate=16000).input_values)
+            key = f.replace("wav", "npy")
+            subject_id = "_".join(key.split("_")[:-1])
+            temp = templates[subject_id]
+
+            if args.dataset=='hdtf':
+                max_len = 5 #try with 5 sec clips 
+                min_len = 1 #discard if last segment < 1 sec
+
+                #need to split wavs - 5 second chunks
+                vertice = np.load(vertice_path,allow_pickle=True)[::2,:].reshape(-1, int(args.vertice_dim))
+                dur = len(speech_array)/16000
+                n_chunks = int(np.ceil(dur/max_len))
+                ac_size = np.ceil(len(input_values)/n_chunks)
+                vc_size = np.ceil(len(vertice)/n_chunks)
+                for i in range(n_chunks):
+                    chunk_key = f'{i}_{key}'
+                    audio_chunk = input_values[i*ac_size:(i+1)*ac_size]
+                    if len(audio_chunk)<min_len:
+                        continue
+                    vertice_chunk = vertice[i*vc_size:(i+1)*vc_size]
+                    data[key]["audio"] = audio_chunk
+                    data[chunk_key]["vertice"] = vertice_chunk
+                    data[chunk_key]["name"] = f
+                    data[chunk_key]["template"] = temp.reshape((-1)) 
+                continue
+            data[key]["name"] = f
+            data[key]["template"] = temp.reshape((-1)) 
+            data[key]["audio"] = input_values
+            if args.dataset == "vocaset":
+                data[key]["vertice"] = np.load(vertice_path,allow_pickle=True)[::2,:]#due to the memory limit
+            # elif args.dataset == "hdtf":
+            #     data[key]["vertice"] = np.load(vertice_path,allow_pickle=True)[::2,:].reshape(-1, int(args.vertice_dim))
+            elif args.dataset == "BIWI":
+                data[key]["vertice"] = np.load(vertice_path,allow_pickle=True)
+
     subjects_dict = {}
     subjects_dict[split] = [i for i in all_subjects.split(" ")]
 
@@ -106,13 +130,22 @@ def read_data(args, subjects, split):
         # valid_idx = vocaset_idx[n_train:n_valid]
         # test_idx = vocaset_idx[n_valid:n_test]
         # splits = {'vocaset':{'train':train_idx,'valid':valid_idx,'test':test_idx}, 'BIWI':{'train':range(1,33),'valid':range(33,37),'test':range(37,41)}}
-        splits = {'vocaset':{'train':range(1,25),'valid':range(25,33),'test':range(33,41)}, 'BIWI':{'train':range(1,33),'valid':range(33,37),'test':range(37,41)}, 'hdtf':{'train':range(1,8),'valid':range(8,10),'test':range(10,13)}}
+        splits = {
+            'vocaset':{'train':range(1,25),'valid':range(25,33),'test':range(33,41)}, 
+            'BIWI':{'train':range(1,33),'valid':range(33,37),'test':range(37,41)}, 
+            'hdtf':{'train':range(1,81),'valid':range(81,91),'test':range(91,101)}
+            }
+        if args.dataset=='hdtf':
+            raise NotImplementedError('cant do hdtf with horizontal pls choose vertical')
+            #could implement something like 80/10/10 split
     elif args.data_split=='vertical':
-        if args.dataset=='vocaset':
-            # print('WARNING: DEFAULT SPLIT ONLY USES HALF THE TEST AND VALID SETS!') #used to be (21,41) - fixed
-            splits = {'vocaset':{'train':range(1,41),'valid':range(1,41),'test':range(1,41)}, 
-                  'BIWI':{'train':range(1,33),'valid':range(33,37),'test':range(37,41)}, 
-                  'hdtf': {'train':range(1,13),'valid':range(1,13),'test':range(1,13)}}
+        # print('WARNING: DEFAULT SPLIT ONLY USES HALF THE TEST AND VALID SETS!') #used to be (21,41) - fixed
+        splits = {
+            'vocaset':{'train':range(1,41),'valid':range(1,41),'test':range(1,41)}, 
+            'BIWI':{'train':range(1,33),'valid':range(33,37),'test':range(37,41)}, 
+            'hdtf': {'train':range(1,999),'valid':range(1,999),'test':range(1,999)}
+            }
+
     elif args.data_split=='stg':
         #imitator style adaptation, just take a few utts (taken from config)
         splits = {'vocaset':{'train':range(1,5),'valid':range(19,21),'test':range(21,41)}}
