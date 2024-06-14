@@ -106,7 +106,7 @@ def calculate_epsilon(steps, sigma, sensitivity, delta):
     return (sensitivity / sigma) * np.sqrt(2 * np.log(1.25 / delta)) * np.sqrt(steps)
 
 
-def train(args, train_loader, model, optimizer, criterion, custom_loss, accountant, fileid_to_filename, epoch=100):
+def train(args, train_loader, model, optimizer, criterion, custom_loss, accountant, epoch=100):
     iteration = 0
     epoch_losses = []
     for e in range(epoch):
@@ -122,7 +122,7 @@ def train(args, train_loader, model, optimizer, criterion, custom_loss, accounta
                 file_name = ''
             else:
                 fileid = int(fileid[0][0]) #if batched just take the first speaker for conditioning?
-                file_name = fileid_to_filename[fileid]
+                file_name = train_loader.dataset.fileid_to_filename[fileid]
             iteration += 1
             audio, vertice, template, one_hot  = audio.to(device="cuda"), vertice.to(device="cuda"), template.to(device="cuda"), one_hot.to(device="cuda")
             if args.model=='faceformer':
@@ -207,13 +207,13 @@ def train(args, train_loader, model, optimizer, criterion, custom_loss, accounta
         epoch_losses.append(epoch_loss)
     return epoch_losses
 
-def eval(args, dev_loader, model, criterion, custom_loss, fileid_to_filename):
+def eval(args, dev_loader, model, criterion, custom_loss):
     valid_loss_log = []
     model.eval()
     train_subjects_list = [i for i in args.all_train_subjects.split(" ")]
     for audio, vertice, template, one_hot_all,fileid in dev_loader:
         fileid = int(fileid)
-        file_name = fileid_to_filename[fileid]
+        file_name = dev_loader.dataset.fileid_to_filename[fileid]
         # to gpu
         audio, vertice, template, one_hot_all= audio.to(device="cuda"), vertice.to(device="cuda"), template.to(device="cuda"), one_hot_all.to(device="cuda")
         train_subject = "_".join(file_name[0].split("_")[:-1])
@@ -249,7 +249,7 @@ def eval(args, dev_loader, model, criterion, custom_loss, fileid_to_filename):
     return current_loss
 
 @torch.no_grad()
-def test(args, model, test_loader, fileid_to_filename):
+def test(args, model, test_loader):
     # save_path = os.path.join(args.dataset,args.save_path)
     train_subjects_list = [i for i in args.all_train_subjects.split(" ")]
 
@@ -260,7 +260,7 @@ def test(args, model, test_loader, fileid_to_filename):
     for audio, vertice, template, one_hot_all, fileid in test_loader:
         # to gpu
         fileid = int(fileid[0]) #just take the first speaker for conditioning?
-        file_name = fileid_to_filename[fileid]
+        file_name = test_loader.dataset.fileid_to_filename[fileid]
         audio, vertice, template, one_hot_all= audio.to(device="cuda"), vertice.to(device="cuda"), template.to(device="cuda"), one_hot_all.to(device="cuda")
         train_subject = "_".join(file_name[0].split("_")[:-1])
         if train_subject in train_subjects_list:
@@ -453,7 +453,7 @@ if __name__=='__main__':
     # testloader = DataLoader(dataset=test_data, batch_size=1, shuffle=False)
 
     class FlowerClient(fl.client.NumPyClient):
-        def __init__(self, net, trainloader, valloader, optimizer, criterion, accountant, fileid_to_filename, cid):
+        def __init__(self, net, trainloader, valloader, optimizer, criterion, accountant, cid):
             loss_cfg = {'full_rec_loss': 1.0, 'velocity_weight': 10.0}
             self.net = net
             self.trainloader = trainloader
@@ -465,7 +465,6 @@ if __name__=='__main__':
             self.train_metrics_path = f'{out_dir}/client_{cid}_train_results.csv'
             self.valid_metrics_path = f'{out_dir}/client_{cid}_valid_results.csv'
             self.custom_loss = Custom_errors(args.vertice_dim, loss_creterion=self.criterion, loss_dict=loss_cfg)
-            self.fileid_to_filename = fileid_to_filename
 
         def get_parameters(self, config):
             return [val.cpu().numpy() for _, val in self.net.state_dict().items()]
@@ -473,15 +472,15 @@ if __name__=='__main__':
         def fit(self, parameters, config):
             print(f"training client {self.cid}")
             set_parameters(self.net, parameters)
-            epoch_losses = train(args, self.trainloader, self.net, self.optimizer, self.criterion, self.custom_loss, self.accountant, self.fileid_to_filename, epoch=args.max_epoch)
+            epoch_losses = train(args, self.trainloader, self.net, self.optimizer, self.criterion, self.custom_loss, self.accountant, epoch=args.max_epoch)
             # evaluate after train epochs concluded
             metrics_dict = {'loss': epoch_losses}
             add_to_csv(self.train_metrics_path, metrics_dict)
 
             print(f"evaluating client {self.cid}")
-            loss = eval(args, self.valloader, self.net, self.criterion, self.custom_loss, self.fileid_to_filename)
+            loss = eval(args, self.valloader, self.net, self.criterion, self.custom_loss)
             # self.net = self.net.to_standard_module()
-            accuracy = test(args, self.net, self.valloader, self.fileid_to_filename)
+            accuracy = test(args, self.net, self.valloader)
             # loss = eval(args, VALLOADER, self.net, self.criterion)
             # accuracy = test(args, self.net, VALLOADER)
             metrics_dict = {'loss': [loss], 'accuracy': [float(accuracy)]}
@@ -570,7 +569,7 @@ if __name__=='__main__':
 
         # dataset = get_dataloaders(args, return_test=False)
 
-        dataset, fileid_to_filename = get_dataloaders(args, train_subjects_subset, splits=['train','valid'])
+        dataset = get_dataloaders(args, train_subjects_subset, splits=['train','valid'])
         
         trainloader = dataset['train']
         valloader = dataset['valid']
@@ -613,7 +612,7 @@ if __name__=='__main__':
 
 
         # Create a  single Flower client representing a single organization
-        client = FlowerClient(model, trainloader, valloader, optimizer, criterion, accountant, fileid_to_filename, cid).to_client()
+        client = FlowerClient(model, trainloader, valloader, optimizer, criterion, accountant, cid).to_client()
 
         #eval intitial parameters - really janky implementation just for debugging
         # npclient = client.numpy_client
@@ -659,7 +658,7 @@ if __name__=='__main__':
         set_parameters(model, parameters)  # Update model with the latest parameters
         
         # dataset = get_dataloaders(args, return_test=False) #load every time for memory
-        dataset, fileid_to_filename = get_dataloaders(args, train_subjects_subset=None, splits=['valid'])
+        dataset = get_dataloaders(args, train_subjects_subset=None, splits=['valid'])
         valloader = dataset['valid']
 
         # valloader = VALLOADER #use global valloader
@@ -668,8 +667,8 @@ if __name__=='__main__':
         loss_cfg = {'full_rec_loss': 1.0, 'velocity_weight': 10.0}        
         custom_loss = Custom_errors(args.vertice_dim, loss_creterion=criterion, loss_dict=loss_cfg)
 
-        loss = eval(args, valloader, model, criterion, custom_loss, fileid_to_filename)
-        accuracy = test(args, model, valloader, fileid_to_filename)
+        loss = eval(args, valloader, model, criterion, custom_loss)
+        accuracy = test(args, model, valloader)
         
         print(f'saving aggregated metrics')
         metrics_dict = {'loss': [loss], 'accuracy': [float(accuracy)]}
