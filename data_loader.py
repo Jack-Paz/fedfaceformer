@@ -32,7 +32,7 @@ class Dataset(data.Dataset):
         vertice = self.data[index]["vertice"]
         template = self.data[index]["template"]
         if self.data_type == "train":
-            subject = "_".join(file_name.split("_")[:-1])
+            subject = self.data[index]['subject']
             one_hot = self.one_hot_labels[self.subjects_dict["train"].index(subject)]
         else:
             one_hot = self.one_hot_labels
@@ -93,30 +93,34 @@ def read_data(args, subjects, split):
                 #need to split wavs - 5 second chunks
                 vertice = np.load(vertice_path,allow_pickle=True)[::2,:].reshape(-1, int(args.vertice_dim))
                 dur = len(speech_array)/16000
-                n_chunks = int(np.ceil(dur/max_len))
-                ac_size = int(np.ceil(len(input_values)/n_chunks))
-                vc_size = int(np.ceil(len(vertice)/n_chunks))
+                n_chunks = int(np.floor(dur/max_len))
+                ac_size = int(np.floor(len(input_values)/n_chunks))
+                vc_size = int(np.floor(len(vertice)/n_chunks))
                 for i in range(n_chunks):
                     chunk_key = f'{i}_{key}'
+                    chunk_name = f'{i}_{f}'
                     audio_chunk = input_values[i*ac_size:(i+1)*ac_size]
-                    if len(audio_chunk)<min_len:
+                    if len(audio_chunk)<(min_len*16000):
                         continue
                     vertice_chunk = vertice[i*vc_size:(i+1)*vc_size]
-                    data[key]["audio"] = audio_chunk
+                    data[chunk_key]["audio"] = audio_chunk
                     data[chunk_key]["vertice"] = vertice_chunk
-                    data[chunk_key]["name"] = f
+                    data[chunk_key]["name"] = chunk_name
+                    data[chunk_key]["subject"] = subject_id
                     data[chunk_key]["template"] = temp.reshape((-1)) 
+                
                 continue
             data[key]["name"] = f
             data[key]["template"] = temp.reshape((-1)) 
             data[key]["audio"] = input_values
+            data[key]["subject"] = subject_id
+
             if args.dataset == "vocaset":
                 data[key]["vertice"] = np.load(vertice_path,allow_pickle=True)[::2,:]#due to the memory limit
             # elif args.dataset == "hdtf":
             #     data[key]["vertice"] = np.load(vertice_path,allow_pickle=True)[::2,:].reshape(-1, int(args.vertice_dim))
             elif args.dataset == "BIWI":
                 data[key]["vertice"] = np.load(vertice_path,allow_pickle=True)
-
     subjects_dict = {}
     subjects_dict[split] = [i for i in all_subjects.split(" ")]
 
@@ -159,7 +163,7 @@ def read_data(args, subjects, split):
             i-=100000
         filename_to_fileid[k[:-4]] = i
         fileid_to_filename[i] = k[:-4]
-        subject_id = "_".join(k.split("_")[:-1])
+        subject_id = v['subject']
         sentence_id = int(k.split(".")[0][-2:])
         if subject_id in subjects.split() and sentence_id in splits[args.dataset][split]:
             # dataset_data.append(v)
@@ -225,8 +229,8 @@ def get_dataloaders(args, train_subjects_subset=None, splits=['train','valid','t
 
         dataset_data = Dataset(dataset_data, subjects_dict, filename_to_fileid, fid_to_fn, split, n_train_speakers)
         shuffle = False if split=='train' else False
-        # dataset[split] = data.DataLoader(dataset=dataset_data, shuffle=shuffle)
-        dataset[split] = data.DataLoader(dataset=dataset_data, batch_size=batch_size, shuffle=shuffle, collate_fn=pad_collate_fn)
+        dataset[split] = data.DataLoader(dataset=dataset_data, shuffle=shuffle)
+        # dataset[split] = data.DataLoader(dataset=dataset_data, batch_size=batch_size, shuffle=shuffle, collate_fn=pad_collate_fn)
     return dataset
 
 

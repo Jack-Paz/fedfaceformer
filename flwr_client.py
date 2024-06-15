@@ -217,6 +217,8 @@ def eval(args, dev_loader, model, criterion, custom_loss):
         # to gpu
         audio, vertice, template, one_hot_all= audio.to(device="cuda"), vertice.to(device="cuda"), template.to(device="cuda"), one_hot_all.to(device="cuda")
         train_subject = "_".join(file_name[0].split("_")[:-1])
+        if args.dataset=='hdtf':
+            train_subject = "_".join(file_name[0].split("_")[1:-1])
         if train_subject in train_subjects_list:
             train_subject_id = train_subjects_list.index(condition_subject)
             train_subject_ids = [train_subject_id]
@@ -262,6 +264,8 @@ def test(args, model, test_loader):
         file_name = test_loader.dataset.fileid_to_filename[fileid]
         audio, vertice, template, one_hot_all= audio.to(device="cuda"), vertice.to(device="cuda"), template.to(device="cuda"), one_hot_all.to(device="cuda")
         train_subject = "_".join(file_name[0].split("_")[:-1])
+        if args.dataset=='hdtf':
+            train_subject = "_".join(file_name[0].split("_")[1:-1])
         if train_subject in train_subjects_list:
             train_subject_id = train_subjects_list.index(condition_subject)
             train_subject_ids = [train_subject_id]

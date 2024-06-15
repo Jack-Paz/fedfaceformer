@@ -1,5 +1,6 @@
 #Data stuff (JP)
 vocaset/
+*.pth
 .*
 FLAMEModel/
 
