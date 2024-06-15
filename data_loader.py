@@ -94,8 +94,8 @@ def read_data(args, subjects, split):
                 vertice = np.load(vertice_path,allow_pickle=True)[::2,:].reshape(-1, int(args.vertice_dim))
                 dur = len(speech_array)/16000
                 n_chunks = int(np.ceil(dur/max_len))
-                ac_size = np.ceil(len(input_values)/n_chunks)
-                vc_size = np.ceil(len(vertice)/n_chunks)
+                ac_size = int(np.ceil(len(input_values)/n_chunks))
+                vc_size = int(np.ceil(len(vertice)/n_chunks))
                 for i in range(n_chunks):
                     chunk_key = f'{i}_{key}'
                     audio_chunk = input_values[i*ac_size:(i+1)*ac_size]
