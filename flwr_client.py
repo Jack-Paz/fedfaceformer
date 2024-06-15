@@ -247,7 +247,6 @@ def eval(args, dev_loader, model, criterion, custom_loss):
     current_loss = np.mean(valid_loss_log)
         # print("epcoh: {}, current loss:{:.7f}".format(e+1,current_loss))    
     return current_loss
-
 @torch.no_grad()
 def test(args, model, test_loader):
     # save_path = os.path.join(args.dataset,args.save_path)
@@ -356,6 +355,7 @@ if __name__=='__main__':
     parser = argparse.ArgumentParser(description='FaceFormer: Speech-Driven 3D Facial Animation with Transformers')
     parser.add_argument("--lr", type=float, default=0.0001, help='learning rate')
     parser.add_argument("--dir", type=str, default='.', help='path to working dir')
+    parser.add_argument("--data_dir", type=str, default='.', help='path to data dir')
     parser.add_argument("--dataset", type=str, default="vocaset", help='vocaset or BIWI | hdtf | combined (hdtf + vocaset)')
     parser.add_argument("--vertice_dim", type=int, default=5023*3, help='number of vertices - 5023*3 for vocaset; 23370*3 for BIWI')
     parser.add_argument("--feature_dim", type=int, default=64, help='64 for vocaset; 128 for BIWI')
