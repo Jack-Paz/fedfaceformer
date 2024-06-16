@@ -278,7 +278,8 @@ def test(args, model, test_loader):
         for iter in train_subject_ids:
             condition_subject = train_subjects_list[iter]
             one_hot = one_hot_all[:,iter,:]
-            prediction = model(audio, template, vertice=None, one_hot=one_hot, criterion=None, test_dataset=test_loader)
+            #vertice=vertice for faceformer. Used for teacher forcing (cheating?!)
+            prediction = model(audio, template, vertice=vertice, one_hot=one_hot, criterion=None, test_dataset=test_loader)
             prediction = prediction.squeeze() # (seq_len, V*3)
             vertice = vertice.squeeze()
             result = lip_max_l2(args.vertice_dim, prediction, vertice)
