@@ -89,7 +89,6 @@ def read_data(args, subjects, split):
             if args.dataset=='hdtf':
                 max_len = 5 #try with 5 sec clips 
                 min_len = 1 #discard if last segment < 1 sec
-
                 #need to split wavs - 5 second chunks
                 vertice = np.load(vertice_path,allow_pickle=True)[::2,:].reshape(-1, int(args.vertice_dim))
                 dur = len(speech_array)/16000

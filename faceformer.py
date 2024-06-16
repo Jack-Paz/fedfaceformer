@@ -115,6 +115,8 @@ class Faceformer(nn.Module):
         if teacher_forcing:
             vertice_emb = obj_embedding.unsqueeze(1) # (1,1,feature_dim)
             style_emb = vertice_emb  
+            if len(vertice.shape)==2:
+                vertice = vertice.unsqueeze(0)
             vertice_input = torch.cat((template,vertice[:,:-1]), 1) # shift one position
             vertice_input = vertice_input - template
             vertice_input = self.vertice_map(vertice_input)
