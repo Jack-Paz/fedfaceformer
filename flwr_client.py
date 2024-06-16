@@ -407,6 +407,7 @@ if __name__=='__main__':
         args.train_subjects = train_subjects
         args.valid_subjects = valid_subjects
         args.test_subjects = test_subjects
+        args.all_train_subjects = train_subjects
 
     if args.data_split=='horizontal':
         print('HORIZONTAL DATA SPLIT, setting vaild and test subjects to train subjects')

@@ -108,7 +108,6 @@ def read_data(args, subjects, split):
                     data[chunk_key]["name"] = chunk_name
                     data[chunk_key]["subject"] = subject_id
                     data[chunk_key]["template"] = temp.reshape((-1)) 
-                
                 continue
             data[key]["name"] = f
             data[key]["template"] = temp.reshape((-1)) 
