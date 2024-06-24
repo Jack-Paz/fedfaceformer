@@ -86,6 +86,9 @@ def enc_dec_mask(device, dataset, T, S):
     elif dataset == "vocaset":
         for i in range(T):
             mask[i, i] = 0
+    elif dataset == "hdtf":
+        for i in range(T):
+            mask[i, i] = 0
     return (mask==1).to(device=device)
 
 def casual_mask(n_head, max_seq_len, period):
@@ -227,7 +230,6 @@ class imitator(nn.Module):
             dataset=test_dataset
             hidden_states = self.audio_encoder(audio, test_dataset).last_hidden_state
             frame_num = hidden_states.shape[1]
-        breakpoint()
 
         hidden_states = self.audio_feature_map(hidden_states)
 
@@ -241,12 +243,12 @@ class imitator(nn.Module):
                 vertice_input = self.PPE(vertice_emb)
             # get the masks
             tgt_mask = self.causal_mh_mask[:audio.shape[0]*4, :vertice_input.shape[1], :vertice_input.shape[1]].clone().detach().to(device=self.device) # JP added the bsz computation 
+            # tgt_mask = self.causal_mh_mask[:, :vertice_input.shape[1], :vertice_input.shape[1]].clone().detach().to(device=self.device)
             # But its always size (:, 1, 1) so why the rest of the vertice_input.shape nonsense? 
             memory_mask = enc_dec_mask(self.device, dataset, vertice_input.shape[1], hidden_states.shape[1])
             gen_viseme_feat = self.transformer_decoder(vertice_input, hidden_states, tgt_mask=tgt_mask, memory_mask=memory_mask)
             new_output = gen_viseme_feat[:,-1,:].unsqueeze(1)
             vertice_emb = torch.cat((vertice_emb, new_output), 1)
-        breakpoint()
         # add the style only to the decoder
         vertice_out_w_style = self.vertice_map_r(gen_viseme_feat, style_emb)
         vertice_out_w_style = vertice_out_w_style + template
