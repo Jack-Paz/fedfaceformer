@@ -90,7 +90,9 @@ def read_data(args, subjects, split):
                 max_len = 5 #try with 5 sec clips 
                 min_len = 1 #discard if last segment < 1 sec
                 #need to split wavs - 5 second chunks
-                vertice = np.load(vertice_path,allow_pickle=True)[::2,:].reshape(-1, int(args.vertice_dim))
+                # vertice = np.load(vertice_path,allow_pickle=True).reshape(-1, int(args.vertice_dim)) #60fps
+                vertice = np.load(vertice_path,allow_pickle=True)[::2,:].reshape(-1, int(args.vertice_dim)) #30fps 
+
                 dur = len(speech_array)/16000
                 n_chunks = int(np.floor(dur/max_len))
                 ac_size = int(np.floor(len(input_values)/n_chunks))

@@ -118,6 +118,8 @@ def train(args, train_loader, model, optimizer, criterion, custom_loss, accounta
         # for i, (audio, vertice, template, one_hot, file_name) in pbar:
         print(f'training epoch{e}')
         for audio, vertice, template, one_hot, fileid in train_loader:
+            # print(audio.shape, vertice.shape)
+            # breakpoint()
             if len(fileid)==0:
                 file_name = ''
             else:
@@ -157,7 +159,6 @@ def train(args, train_loader, model, optimizer, criterion, custom_loss, accounta
                     if not p.requires_grad:
                         # print('doesnt require grad')
                         continue
-                    # breakpoint()
                     p.grad_sample = p.grad.unsqueeze(0)
                     # SETTING GRAD SAMPLE TO GRAD BECAUSE bsz = 1
 
@@ -171,7 +172,6 @@ def train(args, train_loader, model, optimizer, criterion, custom_loss, accounta
                     #         print('new grad shape', p.grad_sample.shape)
                     # else:
                     #     print('grad shape', p.grad_sample.shape)
-                    # breakpoint()
                 # grad_samples = [x.grad_sample for x in model.parameters() if x.requires_grad]
     
             if args.dp=='opacus':
@@ -253,7 +253,6 @@ def eval(args, dev_loader, model, criterion, custom_loss):
 def test(args, model, test_loader):
     # save_path = os.path.join(args.dataset,args.save_path)
     train_subjects_list = [i for i in args.all_train_subjects.split(" ")]
-
     # model.load_state_dict(torch.load(os.path.join(save_path, '{}_model.pth'.format(epoch))))
     # model = model.to(torch.device("cuda"))
     model.eval()
@@ -398,13 +397,17 @@ if __name__=='__main__':
     parser.add_argument("--delta", type=float, default=1e-5, help='dp delta')
     parser.add_argument("--noise_multiplier", type=float, default=1.0, help='dp noise_multiplier')
     parser.add_argument("--max_grad_norm", type=float, default=1.0, help='dp max grad norm')
+    parser.add_argument("--local", action='store_true', help='setup for local dataset instead of remote (only applies for hdtf)')
     args = parser.parse_args()
 
     if args.train_idx != -1:
         args.train_subjects = args.train_subjects.split(" ")[args.train_idx]
 
     if args.dataset=='hdtf':
-        from hdtf_subjects import train_subjects, valid_subjects, test_subjects
+        if args.local:
+            from hdtf_subjects_local import train_subjects, valid_subjects, test_subjects
+        else:
+            from hdtf_subjects import train_subjects, valid_subjects, test_subjects
         args.train_subjects = train_subjects
         args.valid_subjects = valid_subjects
         args.test_subjects = test_subjects
@@ -554,7 +557,12 @@ if __name__=='__main__':
                 set_parameters(model, parameters)
                 print('doing stg02, freezing weights')
                 model = freeze_p2(model)
-
+            elif args.model=='imitator_gen':
+                print('training general imitator model')
+            else: 
+                raise Exception('model type unknown')
+        else: 
+            raise Exception('model type unknown')
         # to cuda
         assert torch.cuda.is_available()
         model = model.to(torch.device("cuda"))
@@ -569,7 +577,6 @@ if __name__=='__main__':
         #     #     except Exception as e:
         #     #         print(e)
         #     #         continue
-        #     # breakpoint()
         # else:
         optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad,model.parameters()), lr=args.lr)
 
@@ -672,7 +679,6 @@ if __name__=='__main__':
         criterion = nn.MSELoss()
         loss_cfg = {'full_rec_loss': 1.0, 'velocity_weight': 10.0}        
         custom_loss = Custom_errors(args.vertice_dim, loss_creterion=criterion, loss_dict=loss_cfg)
-
         loss = eval(args, valloader, model, criterion, custom_loss)
         accuracy = test(args, model, valloader)
         

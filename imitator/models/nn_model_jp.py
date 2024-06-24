@@ -227,6 +227,7 @@ class imitator(nn.Module):
             dataset=test_dataset
             hidden_states = self.audio_encoder(audio, test_dataset).last_hidden_state
             frame_num = hidden_states.shape[1]
+        breakpoint()
 
         hidden_states = self.audio_feature_map(hidden_states)
 
@@ -245,7 +246,7 @@ class imitator(nn.Module):
             gen_viseme_feat = self.transformer_decoder(vertice_input, hidden_states, tgt_mask=tgt_mask, memory_mask=memory_mask)
             new_output = gen_viseme_feat[:,-1,:].unsqueeze(1)
             vertice_emb = torch.cat((vertice_emb, new_output), 1)
-    
+        breakpoint()
         # add the style only to the decoder
         vertice_out_w_style = self.vertice_map_r(gen_viseme_feat, style_emb)
         vertice_out_w_style = vertice_out_w_style + template
