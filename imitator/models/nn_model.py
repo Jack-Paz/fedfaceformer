@@ -220,7 +220,6 @@ class imitator(nn.Module):
         frame_num = vertice.shape[1]
         hidden_states = self.audio_encoder(audio, self.dataset, frame_num=frame_num).last_hidden_state
         hidden_states = self.audio_feature_map(hidden_states)
-    
         for i in range(frame_num):
             if i==0:
                 vertice_emb = obj_embedding.unsqueeze(1) # (1,1,feature_dim)

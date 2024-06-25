@@ -215,21 +215,21 @@ class imitator(nn.Module):
 
         self.vertice_map_r = motion_decoder(in_channels=args.feature_dim, out_channels=args.vertice_dim, num_dec_layers=args.num_dec_layers, fixed_channel=args.fixed_channel, style_concat=args.style_concat)
 
-    def forward(self, audio, template, vertice=None, one_hot=None, criterion=None, teacher_forcing=True, test_dataset=None):
+    def forward(self, audio, template, vertice=None, one_hot=None, criterion=None, teacher_forcing=True, test=False):
         #jp edit to take larger batches
         self.device = audio.device
         # tgt_mask: :math:`(T, T)`.
         # memory_mask: :math:`(T, S)`.
         template = template.unsqueeze(1)  # (bsz, 1, V*3)
         obj_embedding = self.obj_vector(one_hot)  # (bsz, feature_dim)
-        if test_dataset is None:
-            dataset = self.dataset
+        if test:
+            # dataset=test_dataset
+            hidden_states = self.audio_encoder(audio, self.dataset).last_hidden_state
+            frame_num = hidden_states.shape[1]
+        else:
+            # dataset = self.dataset
             frame_num = vertice.shape[1]
             hidden_states = self.audio_encoder(audio, self.dataset, frame_num=frame_num).last_hidden_state #(bsz, n_frames, hidden_dim)
-        else:
-            dataset=test_dataset
-            hidden_states = self.audio_encoder(audio, test_dataset).last_hidden_state
-            frame_num = hidden_states.shape[1]
 
         hidden_states = self.audio_feature_map(hidden_states)
 
@@ -245,14 +245,14 @@ class imitator(nn.Module):
             tgt_mask = self.causal_mh_mask[:audio.shape[0]*4, :vertice_input.shape[1], :vertice_input.shape[1]].clone().detach().to(device=self.device) # JP added the bsz computation 
             # tgt_mask = self.causal_mh_mask[:, :vertice_input.shape[1], :vertice_input.shape[1]].clone().detach().to(device=self.device)
             # But its always size (:, 1, 1) so why the rest of the vertice_input.shape nonsense? 
-            memory_mask = enc_dec_mask(self.device, dataset, vertice_input.shape[1], hidden_states.shape[1])
+            memory_mask = enc_dec_mask(self.device, self.dataset, vertice_input.shape[1], hidden_states.shape[1])
             gen_viseme_feat = self.transformer_decoder(vertice_input, hidden_states, tgt_mask=tgt_mask, memory_mask=memory_mask)
             new_output = gen_viseme_feat[:,-1,:].unsqueeze(1)
             vertice_emb = torch.cat((vertice_emb, new_output), 1)
         # add the style only to the decoder
         vertice_out_w_style = self.vertice_map_r(gen_viseme_feat, style_emb)
         vertice_out_w_style = vertice_out_w_style + template
-        if test_dataset is not None:
+        if test:
             return vertice_out_w_style
         loss = criterion(vertice_out_w_style, vertice) # (batch, seq_len, V*3)
 
@@ -325,7 +325,6 @@ class imitator(nn.Module):
         hidden_states = self.audio_encoder(audio, test_dataset).last_hidden_state
         frame_num = hidden_states.shape[1]
         hidden_states = self.audio_feature_map(hidden_states)
-
         # generate the transformer features
         for i in range(frame_num):
             if i==0:

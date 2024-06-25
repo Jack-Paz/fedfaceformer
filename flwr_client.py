@@ -118,8 +118,6 @@ def train(args, train_loader, model, optimizer, criterion, custom_loss, accounta
         # for i, (audio, vertice, template, one_hot, file_name) in pbar:
         print(f'training epoch{e}')
         for audio, vertice, template, one_hot, fileid in train_loader:
-            # print(audio.shape, vertice.shape)
-            # breakpoint()
             if len(fileid)==0:
                 file_name = ''
             else:
@@ -262,9 +260,11 @@ def test(args, model, test_loader):
         fileid = int(fileid[0]) #just take the first speaker for conditioning?
         file_name = test_loader.dataset.fileid_to_filename[fileid]
         audio, vertice, template, one_hot_all= audio.to(device="cuda"), vertice.to(device="cuda"), template.to(device="cuda"), one_hot_all.to(device="cuda")
-        train_subject = "_".join(file_name[0].split("_")[:-1])
+        if type(file_name)==list:
+            file_name = file_name[0]
+        train_subject = "_".join(file_name.split("_")[:-1])
         if args.dataset=='hdtf':
-            train_subject = "_".join(file_name[0].split("_")[1:-1])
+            train_subject = "_".join(file_name.split("_")[1:-1])
         if train_subject in train_subjects_list:
             train_subject_id = train_subjects_list.index(condition_subject)
             train_subject_ids = [train_subject_id]
@@ -278,7 +278,8 @@ def test(args, model, test_loader):
             condition_subject = train_subjects_list[iter]
             one_hot = one_hot_all[:,iter,:]
             #vertice=vertice for faceformer. Used for teacher forcing (cheating?!)
-            prediction = model(audio, template, vertice=vertice, one_hot=one_hot, criterion=None, test_dataset=test_loader)
+            # prediction = model.predict(audio, template, one_hot)
+            prediction = model(audio, template, vertice=vertice, one_hot=one_hot, criterion=None, test=True)
             prediction = prediction.squeeze() # (seq_len, V*3)
             vertice = vertice.squeeze()
             result = lip_max_l2(args.vertice_dim, prediction, vertice)
