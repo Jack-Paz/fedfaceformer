@@ -5,22 +5,40 @@ import sys
 import re
 import numpy as np
 
-def do_plot(folder_path, file, is_multi, fig_id):
+def do_plot(folder_path, file, is_multi, fig_id, is_train=False):
     file_path = os.path.join(folder_path, file)
     # Read CSV file
-    data = pd.read_csv(file_path)
+    try:
+        data = pd.read_csv(file_path)
+    except:
+        print(f"couldn't read file: {file}")
+        return
+
     if is_multi:
         label = 'train_idx_'
         label += folder_path.split('train_idx_')[1][0]
     else:
         label = file.split('_results.csv')[0]
     # Plot loss
-    plt.figure(fig_id)
-    plt.plot(data['loss'], label=label)
+    plt.figure(fig_id, figsize=(15, 12))
+    if args.include_uninitialised:
+        from_idx = 0
+    else:
+        if is_train:
+            from_idx = 11
+        else:
+            from_idx = 1
+    if label=='aggregated':
+        plt.plot(data['loss'][from_idx:], label=label, color='black')
+    else:
+        plt.plot(data['loss'][from_idx:], label=label)
     if 'accuracy' in data:
         # Plot accuracy
-        plt.figure(fig_id+1)
-        plt.plot(data['accuracy'], label=label)
+        plt.figure(fig_id+1, figsize=(15, 12))
+        if label=='aggregated':
+            plt.plot(data['accuracy'][from_idx:], label=label, color='black')
+        else:
+            plt.plot(data['accuracy'][from_idx:], label=label)
 
 def plot_csv_data(folder_paths, baseline_path=''):
     # Iterate over files in the folder
@@ -40,7 +58,7 @@ def plot_csv_data(folder_paths, baseline_path=''):
             if file.endswith('_train_results.csv'):
                 print('has train results')
                 has_train_results = True
-                do_plot(folder_path, file, is_multi, 3)
+                do_plot(folder_path, file, is_multi, 3, is_train=True)
                 continue
             do_plot(folder_path, file, is_multi, 1)
 
@@ -84,7 +102,7 @@ def plot_csv_data(folder_paths, baseline_path=''):
         plt.title('Loss per Client')
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
-        # plt.legend()
+        plt.legend()
         #put legend outside chart
         plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
         plt.tight_layout()
@@ -114,8 +132,12 @@ def plot_dp_grid_search(folder):
         max_grad_norm = experiment.split('_')[14]
         name = f'd-{delta} nm-{noise_multiplier} gn-{max_grad_norm}'
         exp_path = os.path.join(folder, experiment)
-        train_results = pd.read_csv(os.path.join(exp_path, train_csv))
-        valid_results = pd.read_csv(os.path.join(exp_path, valid_csv))
+        try:
+            train_results = pd.read_csv(os.path.join(exp_path, train_csv))
+            valid_results = pd.read_csv(os.path.join(exp_path, valid_csv))
+        except:
+            print(f"couldn't read file: {train_csv}")
+            continue
         plt.figure(1)
         plt.plot(train_results, label=name)
         plt.figure(2)
@@ -190,6 +212,7 @@ if __name__=='__main__':
     parser.add_argument("--folder_paths", type=str, default='', help='path to folder containing model result csvs')
     parser.add_argument("--baseline_path", type=str, default='', help='path to folder containing baseline result csv')
     parser.add_argument("--dp", action='store_true', help='plot dp grid search instead')
+    parser.add_argument("--include_uninitialised", action='store_true', help='include the 0th index of the csvs (untrained models at start)')
 
     args = parser.parse_args()
     if args.dp:

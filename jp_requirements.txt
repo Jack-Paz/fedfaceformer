@@ -11,6 +11,5 @@ smplx
 chumpy
 setuptools==59.5.0
 numpy==1.22.0
-flwr
 pandas
 matplotlib
