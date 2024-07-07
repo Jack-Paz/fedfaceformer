@@ -408,7 +408,7 @@ if __name__=='__main__':
         if args.local:
             from hdtf_subjects_local import train_subjects, valid_subjects, test_subjects
         else:
-            from hdtf_subjects import train_subjects, valid_subjects, test_subjects
+            from hdtf_subjects_cut import train_subjects, valid_subjects, test_subjects
         args.train_subjects = train_subjects
         args.valid_subjects = valid_subjects
         args.test_subjects = test_subjects
